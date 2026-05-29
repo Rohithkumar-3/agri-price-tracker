@@ -11,7 +11,7 @@ import os, sys, json, requests
 from datetime import date, timedelta
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from database import read_prices, read_anomalies, save_insight, read_commodities, read_markets
 
 
