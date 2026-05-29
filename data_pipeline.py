@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from database import (
     create_commodity, create_market, upsert_price_record,
     read_commodities, read_markets, log_scheduler
