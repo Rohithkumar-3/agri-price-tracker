@@ -27,8 +27,15 @@ DB_PATH = _get_db_path()
 
 
 def _conn() -> sqlite3.Connection:
-    """Open a plain connection — no context manager, no PRAGMA side-effects."""
-    c = sqlite3.connect(DB_PATH, check_same_thread=False)
+    """
+    Open connection in autocommit mode (isolation_level=None).
+    This is the only setting that works consistently across
+    Python 3.10 / 3.11 / 3.12 / 3.13 / 3.14 on all platforms.
+    In autocommit mode every statement commits immediately —
+    no explicit BEGIN/COMMIT needed, no transaction conflicts.
+    """
+    c = sqlite3.connect(DB_PATH, check_same_thread=False,
+                        isolation_level=None)   # autocommit — Python 3.14 safe
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     return c
