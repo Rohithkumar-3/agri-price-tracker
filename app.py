@@ -2,6 +2,7 @@
 Agri Price Tracker — Commodity Market Dashboard
 """
 import streamlit as st
+from streamlit_gtag import st_gtag
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
