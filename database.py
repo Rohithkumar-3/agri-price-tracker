@@ -1,21 +1,24 @@
 """
-Database layer - SQLite CRUD.
-Python 3.14 + Streamlit Cloud compatible.
-- No context manager (with conn) anywhere
-- No PRAGMA journal_mode
-- Explicit conn.close() in every function
-- /tmp path for Streamlit Cloud
+Database layer — works on Python 3.10 through 3.14, Streamlit Cloud.
+
+Key decisions:
+ - autocommit=LEGACY_TRANSACTION_CONTROL  →  old pre-3.12 behaviour on 3.12+
+ - isolation_level=None                  →  same on 3.10/3.11
+ - NO executescript() anywhere           →  breaks with autocommit=True on 3.14
+ - Every table created with a separate   →  safe individual execute() calls
+   execute() call inside an explicit
+   BEGIN / COMMIT block
 """
 import sqlite3
+import sys
 import pandas as pd
 from datetime import date
 from typing import Optional, Dict, Any
 import os
 
-# ── DB Path: /tmp on Streamlit Cloud, local data/ folder otherwise ────────────
+# ── DB Path ───────────────────────────────────────────────────────────────────
 def _get_db_path() -> str:
     src = os.path.dirname(os.path.abspath(__file__))
-    # Streamlit Cloud: source dir is read-only
     if not os.access(src, os.W_OK):
         os.makedirs("/tmp/agri_data", exist_ok=True)
         return "/tmp/agri_data/commodity_market.db"
@@ -25,116 +28,116 @@ def _get_db_path() -> str:
 
 DB_PATH = _get_db_path()
 
-
+# ── Connection ────────────────────────────────────────────────────────────────
 def _conn() -> sqlite3.Connection:
     """
-    Opens SQLite in true autocommit mode — works on Python 3.10 to 3.14.
-    Python 3.14 changed default to autocommit=False which causes
-    DatabaseError on INSERT without explicit BEGIN.
-    Fix: autocommit=True (3.12+ API) or isolation_level=None (older).
+    Returns a connection using LEGACY transaction control on all Python versions.
+    This is the only mode that works correctly with execute(), executemany()
+    AND does not conflict with manual BEGIN/COMMIT on Python 3.14.
     """
-    import sys
-    try:
-        if sys.version_info >= (3, 12):
-            c = sqlite3.connect(DB_PATH, check_same_thread=False,
-                                autocommit=True)
-        else:
-            c = sqlite3.connect(DB_PATH, check_same_thread=False,
-                                isolation_level=None)
-    except TypeError:
-        c = sqlite3.connect(DB_PATH, check_same_thread=False,
-                            isolation_level=None)
+    if sys.version_info >= (3, 12):
+        c = sqlite3.connect(
+            DB_PATH,
+            check_same_thread=False,
+            autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL,
+        )
+    else:
+        c = sqlite3.connect(DB_PATH, check_same_thread=False)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
+    c.isolation_level = None   # autocommit at SQL level for all versions
     return c
+
+# ── Init — NO executescript, each statement separate ─────────────────────────
+TABLES = [
+    """CREATE TABLE IF NOT EXISTS commodities (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL UNIQUE,
+        category   TEXT NOT NULL,
+        unit       TEXT NOT NULL DEFAULT 'Quintal',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS markets (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_name TEXT NOT NULL,
+        state       TEXT NOT NULL,
+        district    TEXT NOT NULL,
+        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(market_name, state)
+    )""",
+    """CREATE TABLE IF NOT EXISTS price_records (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        commodity_id INTEGER NOT NULL,
+        market_id    INTEGER NOT NULL,
+        price_date   DATE NOT NULL,
+        min_price    REAL NOT NULL,
+        max_price    REAL NOT NULL,
+        modal_price  REAL NOT NULL,
+        arrivals     REAL DEFAULT 0,
+        source       TEXT DEFAULT 'Synthetic',
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (commodity_id) REFERENCES commodities(id),
+        FOREIGN KEY (market_id)   REFERENCES markets(id),
+        UNIQUE(commodity_id, market_id, price_date)
+    )""",
+    """CREATE TABLE IF NOT EXISTS anomalies (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        price_record_id INTEGER,
+        commodity_id    INTEGER NOT NULL,
+        market_id       INTEGER NOT NULL,
+        detected_date   DATE NOT NULL,
+        anomaly_type    TEXT NOT NULL,
+        severity        TEXT NOT NULL,
+        deviation_pct   REAL,
+        description     TEXT,
+        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS forecasts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        commodity_id    INTEGER NOT NULL,
+        market_id       INTEGER NOT NULL,
+        forecast_date   DATE NOT NULL,
+        predicted_price REAL NOT NULL,
+        lower_bound     REAL,
+        upper_bound     REAL,
+        model_name      TEXT,
+        confidence      REAL,
+        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(commodity_id, market_id, forecast_date)
+    )""",
+    """CREATE TABLE IF NOT EXISTS ai_insights (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        commodity_id INTEGER,
+        market_id    INTEGER,
+        insight_date DATE NOT NULL,
+        insight_type TEXT NOT NULL,
+        title        TEXT NOT NULL,
+        content      TEXT NOT NULL,
+        sentiment    TEXT DEFAULT 'neutral',
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS scheduler_log (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_name          TEXT NOT NULL,
+        status            TEXT NOT NULL,
+        records_processed INTEGER DEFAULT 0,
+        error_message     TEXT,
+        executed_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS app_meta (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_price_date      ON price_records(price_date)",
+    "CREATE INDEX IF NOT EXISTS idx_price_commodity ON price_records(commodity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_price_market    ON price_records(market_id)",
+]
 
 def init_db():
     c = _conn()
     try:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS commodities (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL UNIQUE,
-            category    TEXT NOT NULL,
-            unit        TEXT NOT NULL DEFAULT 'Quintal',
-            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS markets (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_name TEXT NOT NULL,
-            state       TEXT NOT NULL,
-            district    TEXT NOT NULL,
-            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(market_name, state)
-        );
-        CREATE TABLE IF NOT EXISTS price_records (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            commodity_id INTEGER NOT NULL,
-            market_id    INTEGER NOT NULL,
-            price_date   DATE    NOT NULL,
-            min_price    REAL    NOT NULL,
-            max_price    REAL    NOT NULL,
-            modal_price  REAL    NOT NULL,
-            arrivals     REAL    DEFAULT 0,
-            source       TEXT    DEFAULT 'Synthetic',
-            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (commodity_id) REFERENCES commodities(id),
-            FOREIGN KEY (market_id)   REFERENCES markets(id),
-            UNIQUE(commodity_id, market_id, price_date)
-        );
-        CREATE TABLE IF NOT EXISTS anomalies (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            price_record_id  INTEGER,
-            commodity_id     INTEGER NOT NULL,
-            market_id        INTEGER NOT NULL,
-            detected_date    DATE    NOT NULL,
-            anomaly_type     TEXT    NOT NULL,
-            severity         TEXT    NOT NULL,
-            deviation_pct    REAL,
-            description      TEXT,
-            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS forecasts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            commodity_id    INTEGER NOT NULL,
-            market_id       INTEGER NOT NULL,
-            forecast_date   DATE    NOT NULL,
-            predicted_price REAL    NOT NULL,
-            lower_bound     REAL,
-            upper_bound     REAL,
-            model_name      TEXT,
-            confidence      REAL,
-            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(commodity_id, market_id, forecast_date)
-        );
-        CREATE TABLE IF NOT EXISTS ai_insights (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            commodity_id INTEGER,
-            market_id    INTEGER,
-            insight_date DATE NOT NULL,
-            insight_type TEXT NOT NULL,
-            title        TEXT NOT NULL,
-            content      TEXT NOT NULL,
-            sentiment    TEXT DEFAULT 'neutral',
-            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS scheduler_log (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_name          TEXT NOT NULL,
-            status            TEXT NOT NULL,
-            records_processed INTEGER DEFAULT 0,
-            error_message     TEXT,
-            executed_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS app_meta (
-            key        TEXT PRIMARY KEY,
-            value      TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_price_date      ON price_records(price_date);
-        CREATE INDEX IF NOT EXISTS idx_price_commodity ON price_records(commodity_id);
-        CREATE INDEX IF NOT EXISTS idx_price_market    ON price_records(market_id);
-        """)
+        for stmt in TABLES:
+            c.execute(stmt)
     finally:
         c.close()
 
@@ -151,16 +154,14 @@ def get_meta(key: str) -> Optional[str]:
     finally:
         c.close()
 
-
 def set_meta(key: str, value: str):
     c = _conn()
     try:
-        c.execute("""
-            INSERT INTO app_meta (key, value) VALUES (?,?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value,
-            updated_at=CURRENT_TIMESTAMP
-        """, (key, value))
-        c.commit()
+        c.execute(
+            "INSERT INTO app_meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+            (key, value)
+        )
     finally:
         c.close()
 
@@ -170,16 +171,12 @@ def set_meta(key: str, value: str):
 def create_commodity(name: str, category: str, unit: str = "Quintal") -> int:
     c = _conn()
     try:
-        c.execute(
-            "INSERT OR IGNORE INTO commodities (name, category, unit) VALUES (?,?,?)",
-            (name, category, unit)
-        )
-        c.commit()
+        c.execute("INSERT OR IGNORE INTO commodities(name,category,unit) VALUES(?,?,?)",
+                  (name, category, unit))
         row = c.execute("SELECT id FROM commodities WHERE name=?", (name,)).fetchone()
         return row["id"]
     finally:
         c.close()
-
 
 def read_commodities() -> pd.DataFrame:
     c = _conn()
@@ -188,28 +185,22 @@ def read_commodities() -> pd.DataFrame:
     finally:
         c.close()
 
-
-def update_commodity(cid: int, name: str = None, category: str = None, unit: str = None):
+def update_commodity(cid: int, name=None, category=None, unit=None):
     fields, vals = [], []
     if name:     fields.append("name=?");     vals.append(name)
     if category: fields.append("category=?"); vals.append(category)
     if unit:     fields.append("unit=?");     vals.append(unit)
-    if not fields:
-        return
-    vals.append(cid)
+    if not fields: return
     c = _conn()
     try:
-        c.execute(f"UPDATE commodities SET {', '.join(fields)} WHERE id=?", vals)
-        c.commit()
+        c.execute(f"UPDATE commodities SET {','.join(fields)} WHERE id=?", vals + [cid])
     finally:
         c.close()
-
 
 def delete_commodity(cid: int):
     c = _conn()
     try:
         c.execute("DELETE FROM commodities WHERE id=?", (cid,))
-        c.commit()
     finally:
         c.close()
 
@@ -219,11 +210,8 @@ def delete_commodity(cid: int):
 def create_market(market_name: str, state: str, district: str) -> int:
     c = _conn()
     try:
-        c.execute(
-            "INSERT OR IGNORE INTO markets (market_name, state, district) VALUES (?,?,?)",
-            (market_name, state, district)
-        )
-        c.commit()
+        c.execute("INSERT OR IGNORE INTO markets(market_name,state,district) VALUES(?,?,?)",
+                  (market_name, state, district))
         row = c.execute(
             "SELECT id FROM markets WHERE market_name=? AND state=?",
             (market_name, state)
@@ -232,7 +220,6 @@ def create_market(market_name: str, state: str, district: str) -> int:
     finally:
         c.close()
 
-
 def read_markets() -> pd.DataFrame:
     c = _conn()
     try:
@@ -240,17 +227,15 @@ def read_markets() -> pd.DataFrame:
     finally:
         c.close()
 
-
 def delete_market(mid: int):
     c = _conn()
     try:
         c.execute("DELETE FROM markets WHERE id=?", (mid,))
-        c.commit()
     finally:
         c.close()
 
 
-# ── Price Records CRUD ────────────────────────────────────────────────────────
+# ── Price Records ─────────────────────────────────────────────────────────────
 
 def upsert_price_record(commodity_id, market_id, price_date,
                         min_price, max_price, modal_price,
@@ -259,88 +244,87 @@ def upsert_price_record(commodity_id, market_id, price_date,
     try:
         c.execute("""
             INSERT INTO price_records
-                (commodity_id, market_id, price_date,
-                 min_price, max_price, modal_price, arrivals, source)
+                (commodity_id,market_id,price_date,min_price,max_price,modal_price,arrivals,source)
             VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(commodity_id, market_id, price_date)
-            DO UPDATE SET
-                min_price   = excluded.min_price,
-                max_price   = excluded.max_price,
-                modal_price = excluded.modal_price,
-                arrivals    = excluded.arrivals,
-                source      = excluded.source
+            ON CONFLICT(commodity_id,market_id,price_date) DO UPDATE SET
+                min_price=excluded.min_price, max_price=excluded.max_price,
+                modal_price=excluded.modal_price, arrivals=excluded.arrivals,
+                source=excluded.source
         """, (commodity_id, market_id, price_date,
               float(min_price), float(max_price), float(modal_price),
               float(arrivals), source))
-        c.commit()
     finally:
         c.close()
-
 
 def bulk_insert_prices(records: list):
-    """Fast bulk insert — used by seeder. records = list of tuples."""
+    """Insert list of (commodity_id,market_id,date,min,max,modal,arrivals,source) tuples."""
+    if not records:
+        return
+    # Convert all numeric numpy types to plain Python float/int
+    clean = [
+        (int(r[0]), int(r[1]), str(r[2]),
+         float(r[3]), float(r[4]), float(r[5]),
+         float(r[6]), str(r[7]))
+        for r in records
+    ]
     c = _conn()
     try:
+        c.execute("BEGIN")
         c.executemany("""
             INSERT OR IGNORE INTO price_records
-                (commodity_id, market_id, price_date,
-                 min_price, max_price, modal_price, arrivals, source)
+                (commodity_id,market_id,price_date,min_price,max_price,modal_price,arrivals,source)
             VALUES (?,?,?,?,?,?,?,?)
-        """, records)
-        c.commit()
+        """, clean)
+        c.execute("COMMIT")
+    except Exception as e:
+        try: c.execute("ROLLBACK")
+        except Exception: pass
+        raise e
     finally:
         c.close()
-
 
 def read_prices(commodity_id=None, market_id=None,
                 start_date=None, end_date=None) -> pd.DataFrame:
-    query = """
-        SELECT pr.*, c.name AS commodity_name, c.category, c.unit,
-               m.market_name, m.state, m.district
-        FROM price_records pr
-        JOIN commodities c ON pr.commodity_id = c.id
-        JOIN markets m     ON pr.market_id    = m.id
-        WHERE 1=1
-    """
-    params = []
-    if commodity_id: query += " AND pr.commodity_id=?"; params.append(commodity_id)
-    if market_id:    query += " AND pr.market_id=?";    params.append(market_id)
-    if start_date:   query += " AND pr.price_date>=?";  params.append(start_date)
-    if end_date:     query += " AND pr.price_date<=?";  params.append(end_date)
-    query += " ORDER BY pr.price_date DESC"
+    q = """SELECT pr.*, c.name AS commodity_name, c.category, c.unit,
+                  m.market_name, m.state, m.district
+           FROM price_records pr
+           JOIN commodities c ON pr.commodity_id=c.id
+           JOIN markets m     ON pr.market_id=m.id
+           WHERE 1=1"""
+    p = []
+    if commodity_id: q += " AND pr.commodity_id=?"; p.append(commodity_id)
+    if market_id:    q += " AND pr.market_id=?";    p.append(market_id)
+    if start_date:   q += " AND pr.price_date>=?";  p.append(start_date)
+    if end_date:     q += " AND pr.price_date<=?";  p.append(end_date)
+    q += " ORDER BY pr.price_date DESC"
     c = _conn()
     try:
-        return pd.read_sql_query(query, c, params=params)
+        return pd.read_sql_query(q, c, params=p)
     finally:
         c.close()
-
 
 def delete_price_record(record_id: int):
     c = _conn()
     try:
         c.execute("DELETE FROM price_records WHERE id=?", (record_id,))
-        c.commit()
     finally:
         c.close()
 
 
-# ── Anomaly CRUD ──────────────────────────────────────────────────────────────
+# ── Anomalies ─────────────────────────────────────────────────────────────────
 
 def save_anomaly(commodity_id, market_id, detected_date, anomaly_type,
                  severity, deviation_pct, description, price_record_id=None):
     c = _conn()
     try:
-        c.execute("""
-            INSERT INTO anomalies
-                (price_record_id, commodity_id, market_id, detected_date,
-                 anomaly_type, severity, deviation_pct, description)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (price_record_id, commodity_id, market_id, detected_date,
-              anomaly_type, severity, deviation_pct, description))
-        c.commit()
+        c.execute("""INSERT INTO anomalies
+            (price_record_id,commodity_id,market_id,detected_date,
+             anomaly_type,severity,deviation_pct,description)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (price_record_id, commodity_id, market_id, detected_date,
+             anomaly_type, severity, deviation_pct, description))
     finally:
         c.close()
-
 
 def read_anomalies(days: int = 30) -> pd.DataFrame:
     c = _conn()
@@ -348,75 +332,65 @@ def read_anomalies(days: int = 30) -> pd.DataFrame:
         return pd.read_sql_query("""
             SELECT a.*, c.name AS commodity_name, m.market_name, m.state
             FROM anomalies a
-            JOIN commodities c ON a.commodity_id = c.id
-            JOIN markets m     ON a.market_id    = m.id
-            WHERE a.detected_date >= date('now', ?)
+            JOIN commodities c ON a.commodity_id=c.id
+            JOIN markets m     ON a.market_id=m.id
+            WHERE a.detected_date >= date('now',?)
             ORDER BY a.detected_date DESC
         """, c, params=[f"-{days} days"])
     finally:
         c.close()
 
 
-# ── Forecast CRUD ─────────────────────────────────────────────────────────────
+# ── Forecasts ─────────────────────────────────────────────────────────────────
 
 def save_forecast(commodity_id, market_id, forecast_date, predicted_price,
                   lower_bound=None, upper_bound=None,
                   model_name="RandomForest", confidence=None):
     c = _conn()
     try:
-        c.execute("""
-            INSERT INTO forecasts
-                (commodity_id, market_id, forecast_date, predicted_price,
-                 lower_bound, upper_bound, model_name, confidence)
+        c.execute("""INSERT INTO forecasts
+            (commodity_id,market_id,forecast_date,predicted_price,
+             lower_bound,upper_bound,model_name,confidence)
             VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(commodity_id, market_id, forecast_date)
-            DO UPDATE SET
-                predicted_price = excluded.predicted_price,
-                lower_bound     = excluded.lower_bound,
-                upper_bound     = excluded.upper_bound
-        """, (commodity_id, market_id, forecast_date, predicted_price,
-              lower_bound, upper_bound, model_name, confidence))
-        c.commit()
+            ON CONFLICT(commodity_id,market_id,forecast_date) DO UPDATE SET
+                predicted_price=excluded.predicted_price,
+                lower_bound=excluded.lower_bound,
+                upper_bound=excluded.upper_bound""",
+            (commodity_id, market_id, forecast_date, predicted_price,
+             lower_bound, upper_bound, model_name, confidence))
     finally:
         c.close()
-
 
 def read_forecasts(commodity_id=None, market_id=None) -> pd.DataFrame:
-    query = """
-        SELECT f.*, c.name AS commodity_name, m.market_name, m.state
-        FROM forecasts f
-        JOIN commodities c ON f.commodity_id = c.id
-        JOIN markets m     ON f.market_id    = m.id
-        WHERE f.forecast_date >= date('now')
-    """
-    params = []
-    if commodity_id: query += " AND f.commodity_id=?"; params.append(commodity_id)
-    if market_id:    query += " AND f.market_id=?";    params.append(market_id)
-    query += " ORDER BY f.forecast_date"
+    q = """SELECT f.*, c.name AS commodity_name, m.market_name, m.state
+           FROM forecasts f
+           JOIN commodities c ON f.commodity_id=c.id
+           JOIN markets m     ON f.market_id=m.id
+           WHERE f.forecast_date >= date('now')"""
+    p = []
+    if commodity_id: q += " AND f.commodity_id=?"; p.append(commodity_id)
+    if market_id:    q += " AND f.market_id=?";    p.append(market_id)
+    q += " ORDER BY f.forecast_date"
     c = _conn()
     try:
-        return pd.read_sql_query(query, c, params=params)
+        return pd.read_sql_query(q, c, params=p)
     finally:
         c.close()
 
 
-# ── AI Insights CRUD ──────────────────────────────────────────────────────────
+# ── AI Insights ───────────────────────────────────────────────────────────────
 
 def save_insight(commodity_id, market_id, insight_date,
                  insight_type, title, content, sentiment="neutral"):
     c = _conn()
     try:
-        c.execute("""
-            INSERT INTO ai_insights
-                (commodity_id, market_id, insight_date,
-                 insight_type, title, content, sentiment)
-            VALUES (?,?,?,?,?,?,?)
-        """, (commodity_id, market_id, insight_date,
-              insight_type, title, content, sentiment))
-        c.commit()
+        c.execute("""INSERT INTO ai_insights
+            (commodity_id,market_id,insight_date,insight_type,title,content,sentiment)
+            VALUES (?,?,?,?,?,?,?)""",
+            (commodity_id, market_id, insight_date,
+             insight_type, title, content, sentiment))
     finally:
         c.close()
-
 
 def read_insights(days: int = 7) -> pd.DataFrame:
     c = _conn()
@@ -424,9 +398,9 @@ def read_insights(days: int = 7) -> pd.DataFrame:
         return pd.read_sql_query("""
             SELECT ai.*, c.name AS commodity_name, m.market_name
             FROM ai_insights ai
-            LEFT JOIN commodities c ON ai.commodity_id = c.id
-            LEFT JOIN markets m     ON ai.market_id    = m.id
-            WHERE ai.insight_date >= date('now', ?)
+            LEFT JOIN commodities c ON ai.commodity_id=c.id
+            LEFT JOIN markets m     ON ai.market_id=m.id
+            WHERE ai.insight_date >= date('now',?)
             ORDER BY ai.created_at DESC
         """, c, params=[f"-{days} days"])
     finally:
@@ -438,22 +412,18 @@ def read_insights(days: int = 7) -> pd.DataFrame:
 def log_scheduler(job_name, status, records_processed=0, error_message=None):
     c = _conn()
     try:
-        c.execute("""
-            INSERT INTO scheduler_log
-                (job_name, status, records_processed, error_message)
-            VALUES (?,?,?,?)
-        """, (job_name, status, records_processed, error_message))
-        c.commit()
+        c.execute("""INSERT INTO scheduler_log
+            (job_name,status,records_processed,error_message)
+            VALUES (?,?,?,?)""",
+            (job_name, status, records_processed, error_message))
     finally:
         c.close()
-
 
 def read_scheduler_log(limit: int = 50) -> pd.DataFrame:
     c = _conn()
     try:
         return pd.read_sql_query(
-            f"SELECT * FROM scheduler_log ORDER BY executed_at DESC LIMIT {limit}", c
-        )
+            f"SELECT * FROM scheduler_log ORDER BY executed_at DESC LIMIT {limit}", c)
     finally:
         c.close()
 
@@ -476,7 +446,6 @@ def get_summary_stats() -> Dict[str, Any]:
     finally:
         c.close()
 
-
 def get_state_analytics() -> pd.DataFrame:
     c = _conn()
     try:
@@ -488,14 +457,11 @@ def get_state_analytics() -> pd.DataFrame:
                    MAX(pr.modal_price)             AS max_price,
                    MIN(pr.modal_price)             AS min_price,
                    COUNT(pr.id)                    AS total_records
-            FROM markets m
-            JOIN price_records pr ON m.id = pr.market_id
-            GROUP BY m.state
-            ORDER BY avg_price DESC
+            FROM markets m JOIN price_records pr ON m.id=pr.market_id
+            GROUP BY m.state ORDER BY avg_price DESC
         """, c)
     finally:
         c.close()
-
 
 def get_top_commodities_by_volatility(limit: int = 10) -> pd.DataFrame:
     c = _conn()
@@ -503,34 +469,29 @@ def get_top_commodities_by_volatility(limit: int = 10) -> pd.DataFrame:
         return pd.read_sql_query("""
             SELECT c.name AS commodity_name, c.category,
                    AVG(pr.modal_price) AS avg_price,
-                   (MAX(pr.modal_price) - MIN(pr.modal_price))
-                       / NULLIF(AVG(pr.modal_price), 0) * 100 AS volatility_pct,
+                   (MAX(pr.modal_price)-MIN(pr.modal_price))
+                       /NULLIF(AVG(pr.modal_price),0)*100 AS volatility_pct,
                    COUNT(pr.id) AS records
-            FROM commodities c
-            JOIN price_records pr ON c.id = pr.commodity_id
-            GROUP BY c.id
-            HAVING records > 5
-            ORDER BY volatility_pct DESC
-            LIMIT ?
+            FROM commodities c JOIN price_records pr ON c.id=pr.commodity_id
+            GROUP BY c.id HAVING records>5
+            ORDER BY volatility_pct DESC LIMIT ?
         """, c, params=[limit])
     finally:
         c.close()
-
 
 def get_price_trend(commodity_id: int, market_id: int, days: int = 90) -> pd.DataFrame:
     c = _conn()
     try:
         return pd.read_sql_query("""
-            SELECT price_date, min_price, max_price, modal_price, arrivals
+            SELECT price_date,min_price,max_price,modal_price,arrivals
             FROM price_records
             WHERE commodity_id=? AND market_id=?
-              AND price_date >= date('now', ?)
+              AND price_date >= date('now',?)
             ORDER BY price_date
         """, c, params=[commodity_id, market_id, f"-{days} days"])
     finally:
         c.close()
 
-
 def get_connection():
-    """Public alias — used by smart_scheduler and other modules."""
+    """Public alias used by other modules."""
     return _conn()
