@@ -28,20 +28,25 @@ DB_PATH = _get_db_path()
 
 def _conn() -> sqlite3.Connection:
     """
-    Open connection in autocommit mode (isolation_level=None).
-    This is the only setting that works consistently across
-    Python 3.10 / 3.11 / 3.12 / 3.13 / 3.14 on all platforms.
-    In autocommit mode every statement commits immediately —
-    no explicit BEGIN/COMMIT needed, no transaction conflicts.
+    Opens SQLite in true autocommit mode — works on Python 3.10 to 3.14.
+    Python 3.14 changed default to autocommit=False which causes
+    DatabaseError on INSERT without explicit BEGIN.
+    Fix: autocommit=True (3.12+ API) or isolation_level=None (older).
     """
-    c = sqlite3.connect(DB_PATH, check_same_thread=False,
-                        isolation_level=None)   # autocommit — Python 3.14 safe
+    import sys
+    try:
+        if sys.version_info >= (3, 12):
+            c = sqlite3.connect(DB_PATH, check_same_thread=False,
+                                autocommit=True)
+        else:
+            c = sqlite3.connect(DB_PATH, check_same_thread=False,
+                                isolation_level=None)
+    except TypeError:
+        c = sqlite3.connect(DB_PATH, check_same_thread=False,
+                            isolation_level=None)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     return c
-
-
-# ── Init ──────────────────────────────────────────────────────────────────────
 
 def init_db():
     c = _conn()
