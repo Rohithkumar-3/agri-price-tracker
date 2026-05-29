@@ -2,7 +2,6 @@
 Agri Price Tracker — Commodity Market Dashboard
 """
 import streamlit as st
-from streamlit_gtag import st_gtag
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -33,16 +32,6 @@ st.set_page_config(
 )
 from streamlit_gtag import st_gtag
 
-st_gtag(
-    key="agri-price-tracker",
-    id="G-NX7GQGYFL8",
-    event_name="app_loaded",
-    params={
-        "event_category": "engagement",
-        "event_label": "Agri Price Tracker",
-        "value": 1,
-    },
-)
 
 st.title("Agri Price Tracker")
 
