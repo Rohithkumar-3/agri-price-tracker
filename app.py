@@ -127,12 +127,11 @@ def boot():
     """
     import numpy as np
     from datetime import date, timedelta
-    import sqlite3
 
     init_db()
 
     # Check if already seeded using app_meta flag
-    from database import get_meta, set_meta, DB_PATH
+    from database import get_meta, set_meta
     already_seeded = get_meta("seeded")
     if already_seeded == "true":
         return True
@@ -184,16 +183,8 @@ def boot():
                     float(arrivals[i]), "Synthetic"
                 ))
 
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=DELETE")
-    conn.executemany("""
-        INSERT OR IGNORE INTO price_records
-            (commodity_id, market_id, price_date,
-             min_price, max_price, modal_price, arrivals, source)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, records)
-    conn.commit()
-    conn.close()
+    from database import bulk_insert_prices
+    bulk_insert_prices(records)
 
     # Mark as seeded so we never run this again
     set_meta("seeded", "true")
