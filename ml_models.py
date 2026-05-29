@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_percentage_error
 import os, sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from database import (
     read_prices, save_forecast, save_anomaly,
     read_commodities, read_markets
