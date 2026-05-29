@@ -19,6 +19,16 @@ from data_pipeline import fetch_and_store_prices, seed_reference_data
 from ml_models import forecast_prices, detect_anomalies
 from ai_insights import generate_price_movement_insight
 
+st.markdown(
+    """
+   <meta name="google-site-verification" content="XDTlEfC6BYeOAxEEiPfSJGK6k7PWRjZHJmnDGL-DlXY" />
+    """,
+    unsafe_allow_html=True
+)
+
+# Rest of your app
+st.title("Agri Price Tracker")
+
 # ── Page Setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Agri Price Tracker 🌾",
