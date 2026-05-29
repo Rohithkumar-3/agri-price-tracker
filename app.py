@@ -2,6 +2,7 @@
 Agri Price Tracker — Commodity Market Dashboard
 """
 import streamlit as st
+from streamlit_analytics2 import streamlit_analytics
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -19,15 +20,9 @@ from data_pipeline import fetch_and_store_prices, seed_reference_data
 from ml_models import forecast_prices, detect_anomalies
 from ai_insights import generate_price_movement_insight
 
-st.markdown(
-    """
-   <meta name="google-site-verification" content="XDTlEfC6BYeOAxEEiPfSJGK6k7PWRjZHJmnDGL-DlXY" />
-    """,
-    unsafe_allow_html=True
-)
+
 
 # Rest of your app
-st.title("Agri Price Tracker")
 
 # ── Page Setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -36,6 +31,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+st.title("Agri Price Tracker")
+
+st.markdown("""
+Track daily commodity prices across Indian markets.
+View trends, forecasts, anomalies, and market insights to help farmers and traders make informed decisions.
+""")
 
 # ── CSS — clean, large text, green farm theme ─────────────────────────────────
 st.markdown("""
