@@ -28,16 +28,14 @@ def get_connection():
     conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES,
                            check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    # WAL mode fails on some cloud filesystems — use DELETE mode (safe everywhere)
-    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
 def init_db():
     """Initialize all tables."""
-    with get_connection() as conn:
+    conn = get_connection()
+    try:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS commodities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +129,8 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_price_market     ON price_records(market_id);
         """)
         conn.commit()
+    finally:
+        conn.close()
 
 
 # ── App meta (used to track seeding state) ────────────────────────────────────
