@@ -1,0 +1,36 @@
+# ── Secrets (NEVER commit these) ──────────────────────
+.env
+config.txt
+*.key
+
+# ── Database (too large, regenerates automatically) ───
+data/commodity_market.db
+data/*.db
+*.db
+
+# ── Python cache ──────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Logs ──────────────────────────────────────────────
+*.log
+scheduler.log
+
+# ── OS files ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDEs ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ── Temp files ────────────────────────────────────────
+{data,models,api,utils,pages}
+data_pipeline_patch.py
