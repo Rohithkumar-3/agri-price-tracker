@@ -13,15 +13,11 @@ from database import (
     init_db, get_summary_stats, read_commodities, read_markets,
     read_prices, read_anomalies, read_forecasts, read_insights,
     get_state_analytics, get_top_commodities_by_volatility,
-    get_price_trend, read_scheduler_log,
+    get_price_trend, read_scheduler_log, get_meta, set_meta,
 )
 from data_pipeline import fetch_and_store_prices, seed_reference_data
 from ml_models import forecast_prices, detect_anomalies
 from ai_insights import generate_price_movement_insight
-
-
-
-# Rest of your app
 
 # ── Page Setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -30,14 +26,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-
-st.title("Agri Price Tracker")
-
-st.markdown("""
-Track daily commodity prices across Indian markets.
-View trends, forecasts, anomalies, and market insights to help farmers and traders make informed decisions.
-""")
 
 # ── CSS — clean, large text, green farm theme ─────────────────────────────────
 st.markdown("""
@@ -128,12 +116,88 @@ section[data-testid="stSidebar"] .stSelectbox > div > div { background: #2e7d32 
 """, unsafe_allow_html=True)
 
 # ── Init DB ───────────────────────────────────────────────────────────────────
-@st.cache_resource
+@st.cache_resource(show_spinner="Setting up database — please wait...")
 def boot():
+    """
+    Runs ONCE per server session (cached by Streamlit).
+    1. Init DB tables
+    2. Seed commodities + markets if empty
+    3. Generate 120-day synthetic price history if empty
+    Never runs again until the server restarts.
+    """
+    import numpy as np
+    from datetime import date, timedelta
+    import sqlite3
+
     init_db()
-    stats = get_summary_stats()
-    if stats["total_records"] == 0:
-        seed_reference_data()
+
+    # Check if already seeded using app_meta flag
+    from database import get_meta, set_meta, DB_PATH
+    already_seeded = get_meta("seeded")
+    if already_seeded == "true":
+        return True
+
+    # Seed reference data (commodities + markets)
+    seed_reference_data()
+
+    # Fast vectorized synthetic seed — 120 days of history
+    from database import read_commodities, read_markets
+    comms_df = read_commodities()
+    mkts_df  = read_markets()
+
+    BASE_PRICES = {
+        "Rice":2200,"Wheat":2100,"Maize":1800,"Barley":1700,"Jowar":2000,"Bajra":1900,"Ragi":2300,
+        "Tur Dal":8500,"Moong Dal":9500,"Urad Dal":9000,"Chana Dal":7000,"Masoor Dal":7500,
+        "Tomato":1500,"Onion":1800,"Potato":1400,"Brinjal":1200,"Cabbage":900,"Cauliflower":1100,
+        "Carrot":1600,"Spinach":1000,"Bitter Gourd":1800,"Capsicum":2200,
+        "Banana":2000,"Mango":5000,"Apple":8000,"Grapes":4500,"Orange":3500,"Papaya":1800,
+        "Turmeric":8000,"Chilli":12000,"Coriander":7000,"Cumin":18000,"Ginger":6000,"Garlic":12000,
+        "Groundnut":5500,"Mustard":5200,"Soybean":4800,"Sunflower":5000,"Sesame":9000,
+    }
+    MARKET_PREMIUM = {
+        "Azadpur":1.05,"Vashi":1.08,"Bowenpally":0.97,
+        "Koyambedu":1.02,"Yeshwanthpur":1.06,"Gultekdi":1.04,
+    }
+
+    days_back = 120
+    today     = date.today()
+    dates     = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days_back)]
+
+    records = []
+    rng = np.random.default_rng(42)
+    for _, c in comms_df.iterrows():
+        base = BASE_PRICES.get(c["name"], 2000)
+        for _, m in mkts_df.iterrows():
+            doys     = np.array([(today-timedelta(days=i)).timetuple().tm_yday for i in range(days_back)])
+            seasonal = 1.0 + 0.15 * np.sin(2 * np.pi * (doys - 90) / 365)
+            noise    = rng.normal(0, 0.03, days_back)
+            premium  = MARKET_PREMIUM.get(m["market_name"], 1.0)
+            modal    = np.round(base * seasonal * premium * (1 + noise), 2)
+            spread   = rng.uniform(0.03, 0.07, days_back)
+            min_p    = np.round(modal * (1 - spread), 2)
+            max_p    = np.round(modal * (1 + spread), 2)
+            arrivals = np.round(rng.uniform(50, 500, days_back), 1)
+            for i, d in enumerate(dates):
+                records.append((
+                    int(c["id"]), int(m["id"]), d,
+                    float(min_p[i]), float(max_p[i]), float(modal[i]),
+                    float(arrivals[i]), "Synthetic"
+                ))
+
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.executemany("""
+        INSERT OR IGNORE INTO price_records
+            (commodity_id, market_id, price_date,
+             min_price, max_price, modal_price, arrivals, source)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, records)
+    conn.commit()
+    conn.close()
+
+    # Mark as seeded so we never run this again
+    set_meta("seeded", "true")
+    set_meta("seed_date", str(date.today()))
     return True
 
 boot()
