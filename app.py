@@ -30,7 +30,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-from streamlit_gtag import st_gtag
 
 
 st.title("Agri Price Tracker")
