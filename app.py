@@ -116,15 +116,13 @@ section[data-testid="stSidebar"] .stSelectbox > div > div { background: #2e7d32 
 """, unsafe_allow_html=True)
 
 # ── Init DB ───────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Setting up database — please wait...")
 def boot():
     """
-    Runs ONCE per server session (cached by Streamlit).
-    1. Init DB tables
-    2. Seed commodities + markets if empty
-    3. Generate 120-day synthetic price history if empty
-    Never runs again until the server restarts.
+    Runs once per session using st.session_state guard.
+    No @st.cache_resource — that swallows errors silently.
     """
+    if st.session_state.get("booted"):
+        return True
     import numpy as np
     from datetime import date, timedelta
 
@@ -189,13 +187,12 @@ def boot():
     # Mark as seeded so we never run this again
     set_meta("seeded", "true")
     set_meta("seed_date", str(date.today()))
+    st.session_state["booted"] = True
     return True
 
-# Boot runs once — initialises DB and seeds data
-try:
+# Boot — runs once per session
+with st.spinner("Setting up... please wait"):
     boot()
-except Exception as _boot_err:
-    st.warning(f"Setup issue: {_boot_err}")
 
 # ── Load reference data ───────────────────────────────────────────────────────
 commodities_df = read_commodities()
