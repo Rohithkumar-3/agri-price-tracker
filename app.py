@@ -191,15 +191,11 @@ def boot():
     set_meta("seed_date", str(date.today()))
     return True
 
-# Run boot — if it fails, still init DB so the app doesn't crash
+# Boot runs once — initialises DB and seeds data
 try:
     boot()
 except Exception as _boot_err:
-    init_db()
-    st.warning(f"Setup warning: {_boot_err}. App may have limited data.")
-
-# Safety net — always init DB before reading (in case boot was cached/skipped)
-init_db()
+    st.warning(f"Setup issue: {_boot_err}")
 
 # ── Load reference data ───────────────────────────────────────────────────────
 commodities_df = read_commodities()
