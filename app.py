@@ -580,7 +580,7 @@ with tab3:
                     marker=dict(symbol="diamond", size=8, color="#f57c00"),
                 ))
                 fig.add_vline(
-                    x=hist["price_date"].max(),
+                    x=str(hist["price_date"].max())[:10],
                     line_dash="dash", line_color="#999",
                     annotation_text="Today", annotation_position="top"
                 )
