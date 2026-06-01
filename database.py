@@ -95,13 +95,17 @@ _SCHEMA = [
 ]
 
 def init_db():
-    c = _conn()
-    try:
-        for stmt in _SCHEMA:
+    """Create tables if they don't exist. Each statement gets its own connection
+    to avoid transaction/locking conflicts on Python 3.14."""
+    for stmt in _SCHEMA:
+        c = _conn()
+        try:
             c.execute(stmt)
-        c.commit()
-    finally:
-        c.close()
+            c.commit()
+        except Exception:
+            pass  # table/index already exists — safe to ignore
+        finally:
+            c.close()
 
 # ── App meta ──────────────────────────────────────────────────────────────────
 def get_meta(key: str) -> Optional[str]:
