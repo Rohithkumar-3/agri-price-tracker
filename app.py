@@ -26,6 +26,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st.markdown("""
+<!-- Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-NX7GQGYFL8"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-NX7GQGYFL8');
+</script>
+""", unsafe_allow_html=True)
 
 # ── CSS ─────────────────────────────────────────────────────────────────────
 st.markdown("""
