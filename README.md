@@ -274,6 +274,9 @@ Full docs: http://localhost:8000/docs
 
 ---
 
+## Note
+Ai Forecast is removed.
+
 ## Contact
 Rohith Kumar V 
 Linkedin:https://www.linkedin.com/in/rohith-kumar-rk/
