@@ -1,497 +1,276 @@
 """
-Database layer — works on Python 3.10 through 3.14, Streamlit Cloud.
-
-Key decisions:
- - autocommit=LEGACY_TRANSACTION_CONTROL  →  old pre-3.12 behaviour on 3.12+
- - isolation_level=None                  →  same on 3.10/3.11
- - NO executescript() anywhere           →  breaks with autocommit=True on 3.14
- - Every table created with a separate   →  safe individual execute() calls
-   execute() call inside an explicit
-   BEGIN / COMMIT block
+database.py — File-based storage (JSON + CSV).
+No SQLite. No C extensions. Works on Python 3.10-3.14, Streamlit Cloud, everywhere.
 """
-import sqlite3
-import sys
+import os, json, csv
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional, Dict, Any
-import os
 
-# ── DB Path ───────────────────────────────────────────────────────────────────
-def _get_db_path() -> str:
+# ── Storage path ──────────────────────────────────────────────────────────────
+def _base() -> str:
     src = os.path.dirname(os.path.abspath(__file__))
-    if not os.access(src, os.W_OK):
-        os.makedirs("/tmp/agri_data", exist_ok=True)
-        return "/tmp/agri_data/commodity_market.db"
-    local = os.path.join(src, "data")
-    os.makedirs(local, exist_ok=True)
-    return os.path.join(local, "commodity_market.db")
+    p = "/tmp/agri_data" if not os.access(src, os.W_OK) else os.path.join(src, "data")
+    os.makedirs(p, exist_ok=True)
+    return p
 
-DB_PATH = _get_db_path()
+def _p(name: str) -> str:
+    return os.path.join(_base(), name)
 
-# ── Connection ────────────────────────────────────────────────────────────────
-def _conn() -> sqlite3.Connection:
-    """
-    Returns a connection using LEGACY transaction control on all Python versions.
-    This is the only mode that works correctly with execute(), executemany()
-    AND does not conflict with manual BEGIN/COMMIT on Python 3.14.
-    """
-    if sys.version_info >= (3, 12):
-        c = sqlite3.connect(
-            DB_PATH,
-            check_same_thread=False,
-            autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL,
-        )
-    else:
-        c = sqlite3.connect(DB_PATH, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.isolation_level = None   # autocommit at SQL level for all versions
-    return c
+def _rj(name: str, default):
+    f = _p(name)
+    if not os.path.exists(f): return default
+    with open(f) as fh: return json.load(fh)
 
-# ── Init — NO executescript, each statement separate ─────────────────────────
-TABLES = [
-    """CREATE TABLE IF NOT EXISTS commodities (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        name       TEXT NOT NULL UNIQUE,
-        category   TEXT NOT NULL,
-        unit       TEXT NOT NULL DEFAULT 'Quintal',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS markets (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        market_name TEXT NOT NULL,
-        state       TEXT NOT NULL,
-        district    TEXT NOT NULL,
-        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(market_name, state)
-    )""",
-    """CREATE TABLE IF NOT EXISTS price_records (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        commodity_id INTEGER NOT NULL,
-        market_id    INTEGER NOT NULL,
-        price_date   DATE NOT NULL,
-        min_price    REAL NOT NULL,
-        max_price    REAL NOT NULL,
-        modal_price  REAL NOT NULL,
-        arrivals     REAL DEFAULT 0,
-        source       TEXT DEFAULT 'Synthetic',
-        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (commodity_id) REFERENCES commodities(id),
-        FOREIGN KEY (market_id)   REFERENCES markets(id),
-        UNIQUE(commodity_id, market_id, price_date)
-    )""",
-    """CREATE TABLE IF NOT EXISTS anomalies (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        price_record_id INTEGER,
-        commodity_id    INTEGER NOT NULL,
-        market_id       INTEGER NOT NULL,
-        detected_date   DATE NOT NULL,
-        anomaly_type    TEXT NOT NULL,
-        severity        TEXT NOT NULL,
-        deviation_pct   REAL,
-        description     TEXT,
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS forecasts (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        commodity_id    INTEGER NOT NULL,
-        market_id       INTEGER NOT NULL,
-        forecast_date   DATE NOT NULL,
-        predicted_price REAL NOT NULL,
-        lower_bound     REAL,
-        upper_bound     REAL,
-        model_name      TEXT,
-        confidence      REAL,
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(commodity_id, market_id, forecast_date)
-    )""",
-    """CREATE TABLE IF NOT EXISTS ai_insights (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        commodity_id INTEGER,
-        market_id    INTEGER,
-        insight_date DATE NOT NULL,
-        insight_type TEXT NOT NULL,
-        title        TEXT NOT NULL,
-        content      TEXT NOT NULL,
-        sentiment    TEXT DEFAULT 'neutral',
-        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS scheduler_log (
-        id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_name          TEXT NOT NULL,
-        status            TEXT NOT NULL,
-        records_processed INTEGER DEFAULT 0,
-        error_message     TEXT,
-        executed_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS app_meta (
-        key        TEXT PRIMARY KEY,
-        value      TEXT NOT NULL,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_price_date      ON price_records(price_date)",
-    "CREATE INDEX IF NOT EXISTS idx_price_commodity ON price_records(commodity_id)",
-    "CREATE INDEX IF NOT EXISTS idx_price_market    ON price_records(market_id)",
-]
+def _wj(name: str, data):
+    with open(_p(name), "w") as fh: json.dump(data, fh, default=str)
 
+def _rcsv(name: str) -> pd.DataFrame:
+    f = _p(name)
+    if not os.path.exists(f) or os.path.getsize(f) == 0: return pd.DataFrame()
+    return pd.read_csv(f, dtype=str)
+
+def _wcsv(name: str, df: pd.DataFrame):
+    df.to_csv(_p(name), index=False)
+
+# ── Init (no-op for file storage) ────────────────────────────────────────────
 def init_db():
-    c = _conn()
-    try:
-        for stmt in TABLES:
-            c.execute(stmt)
-    finally:
-        c.close()
+    _base()  # just ensure directory exists
 
-
-# ── App Meta ──────────────────────────────────────────────────────────────────
-
+# ── App meta ──────────────────────────────────────────────────────────────────
 def get_meta(key: str) -> Optional[str]:
-    c = _conn()
-    try:
-        row = c.execute("SELECT value FROM app_meta WHERE key=?", (key,)).fetchone()
-        return row["value"] if row else None
-    except Exception:
-        return None
-    finally:
-        c.close()
+    return _rj("meta.json", {}).get(key)
 
 def set_meta(key: str, value: str):
-    c = _conn()
-    try:
-        c.execute(
-            "INSERT INTO app_meta(key,value) VALUES(?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
-            (key, value)
-        )
-    finally:
-        c.close()
+    m = _rj("meta.json", {})
+    m[key] = value
+    _wj("meta.json", m)
 
-
-# ── Commodity CRUD ────────────────────────────────────────────────────────────
-
+# ── Commodities ───────────────────────────────────────────────────────────────
 def create_commodity(name: str, category: str, unit: str = "Quintal") -> int:
-    c = _conn()
-    try:
-        c.execute("INSERT OR IGNORE INTO commodities(name,category,unit) VALUES(?,?,?)",
-                  (name, category, unit))
-        row = c.execute("SELECT id FROM commodities WHERE name=?", (name,)).fetchone()
-        return row["id"]
-    finally:
-        c.close()
+    d = _rj("commodities.json", {})
+    if name not in d:
+        d[name] = {"id": max((v["id"] for v in d.values()), default=0)+1,
+                   "name": name, "category": category, "unit": unit}
+        _wj("commodities.json", d)
+    return d[name]["id"]
 
 def read_commodities() -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("SELECT * FROM commodities ORDER BY name", c)
-    finally:
-        c.close()
+    d = _rj("commodities.json", {})
+    if not d: return pd.DataFrame(columns=["id","name","category","unit"])
+    return pd.DataFrame(list(d.values())).sort_values("name").reset_index(drop=True)
 
-def update_commodity(cid: int, name=None, category=None, unit=None):
-    fields, vals = [], []
-    if name:     fields.append("name=?");     vals.append(name)
-    if category: fields.append("category=?"); vals.append(category)
-    if unit:     fields.append("unit=?");     vals.append(unit)
-    if not fields: return
-    c = _conn()
-    try:
-        c.execute(f"UPDATE commodities SET {','.join(fields)} WHERE id=?", vals + [cid])
-    finally:
-        c.close()
+def update_commodity(cid, name=None, category=None, unit=None):
+    d = _rj("commodities.json", {})
+    for k,v in d.items():
+        if v["id"]==cid:
+            if name: d[k]["name"]=name
+            if category: d[k]["category"]=category
+            if unit: d[k]["unit"]=unit
+    _wj("commodities.json", d)
 
-def delete_commodity(cid: int):
-    c = _conn()
-    try:
-        c.execute("DELETE FROM commodities WHERE id=?", (cid,))
-    finally:
-        c.close()
+def delete_commodity(cid):
+    d = _rj("commodities.json", {})
+    _wj("commodities.json", {k:v for k,v in d.items() if v["id"]!=cid})
 
-
-# ── Market CRUD ───────────────────────────────────────────────────────────────
-
+# ── Markets ───────────────────────────────────────────────────────────────────
 def create_market(market_name: str, state: str, district: str) -> int:
-    c = _conn()
-    try:
-        c.execute("INSERT OR IGNORE INTO markets(market_name,state,district) VALUES(?,?,?)",
-                  (market_name, state, district))
-        row = c.execute(
-            "SELECT id FROM markets WHERE market_name=? AND state=?",
-            (market_name, state)
-        ).fetchone()
-        return row["id"]
-    finally:
-        c.close()
+    d = _rj("markets.json", {})
+    k = f"{market_name}|{state}"
+    if k not in d:
+        d[k] = {"id": max((v["id"] for v in d.values()), default=0)+1,
+                 "market_name": market_name, "state": state, "district": district}
+        _wj("markets.json", d)
+    return d[k]["id"]
 
 def read_markets() -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("SELECT * FROM markets ORDER BY state, market_name", c)
-    finally:
-        c.close()
+    d = _rj("markets.json", {})
+    if not d: return pd.DataFrame(columns=["id","market_name","state","district"])
+    return pd.DataFrame(list(d.values())).sort_values(["state","market_name"]).reset_index(drop=True)
 
-def delete_market(mid: int):
-    c = _conn()
-    try:
-        c.execute("DELETE FROM markets WHERE id=?", (mid,))
-    finally:
-        c.close()
+def delete_market(mid):
+    d = _rj("markets.json", {})
+    _wj("markets.json", {k:v for k,v in d.items() if v["id"]!=mid})
 
+# ── Price records ─────────────────────────────────────────────────────────────
+_PC = ["commodity_id","market_id","price_date","min_price","max_price","modal_price","arrivals","source"]
 
-# ── Price Records ─────────────────────────────────────────────────────────────
+def _lp() -> pd.DataFrame:
+    df = _rcsv("prices.csv")
+    if df.empty: return pd.DataFrame(columns=_PC)
+    for c in ["min_price","max_price","modal_price","arrivals"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["commodity_id"] = df["commodity_id"].astype(int)
+    df["market_id"]    = df["market_id"].astype(int)
+    return df
 
 def upsert_price_record(commodity_id, market_id, price_date,
-                        min_price, max_price, modal_price,
-                        arrivals=0, source="Synthetic"):
-    c = _conn()
-    try:
-        c.execute("""
-            INSERT INTO price_records
-                (commodity_id,market_id,price_date,min_price,max_price,modal_price,arrivals,source)
-            VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(commodity_id,market_id,price_date) DO UPDATE SET
-                min_price=excluded.min_price, max_price=excluded.max_price,
-                modal_price=excluded.modal_price, arrivals=excluded.arrivals,
-                source=excluded.source
-        """, (commodity_id, market_id, price_date,
-              float(min_price), float(max_price), float(modal_price),
-              float(arrivals), source))
-    finally:
-        c.close()
+                        min_price, max_price, modal_price, arrivals=0, source="Synthetic"):
+    df   = _lp()
+    row  = {"commodity_id":int(commodity_id),"market_id":int(market_id),
+            "price_date":str(price_date),"min_price":float(min_price),
+            "max_price":float(max_price),"modal_price":float(modal_price),
+            "arrivals":float(arrivals),"source":source}
+    mask = ((df["commodity_id"]==int(commodity_id))&
+            (df["market_id"]==int(market_id))&
+            (df["price_date"]==str(price_date)))
+    if mask.any():
+        for k,v in row.items(): df.loc[mask,k]=v
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _wcsv("prices.csv", df)
 
 def bulk_insert_prices(records: list):
-    """Insert list of (commodity_id,market_id,date,min,max,modal,arrivals,source) tuples."""
-    if not records:
-        return
-    # Convert all numeric numpy types to plain Python float/int
-    clean = [
-        (int(r[0]), int(r[1]), str(r[2]),
-         float(r[3]), float(r[4]), float(r[5]),
-         float(r[6]), str(r[7]))
-        for r in records
-    ]
-    c = _conn()
-    try:
-        c.execute("BEGIN")
-        c.executemany("""
-            INSERT OR IGNORE INTO price_records
-                (commodity_id,market_id,price_date,min_price,max_price,modal_price,arrivals,source)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, clean)
-        c.execute("COMMIT")
-    except Exception as e:
-        try: c.execute("ROLLBACK")
-        except Exception: pass
-        raise e
-    finally:
-        c.close()
+    if not records: return
+    new = pd.DataFrame([
+        {"commodity_id":int(r[0]),"market_id":int(r[1]),"price_date":str(r[2]),
+         "min_price":float(r[3]),"max_price":float(r[4]),"modal_price":float(r[5]),
+         "arrivals":float(r[6]),"source":str(r[7])} for r in records])
+    ex = _lp()
+    if ex.empty:
+        _wcsv("prices.csv", new)
+    else:
+        combined = pd.concat([ex, new], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["commodity_id","market_id","price_date"], keep="last")
+        _wcsv("prices.csv", combined)
 
-def read_prices(commodity_id=None, market_id=None,
-                start_date=None, end_date=None) -> pd.DataFrame:
-    q = """SELECT pr.*, c.name AS commodity_name, c.category, c.unit,
-                  m.market_name, m.state, m.district
-           FROM price_records pr
-           JOIN commodities c ON pr.commodity_id=c.id
-           JOIN markets m     ON pr.market_id=m.id
-           WHERE 1=1"""
-    p = []
-    if commodity_id: q += " AND pr.commodity_id=?"; p.append(commodity_id)
-    if market_id:    q += " AND pr.market_id=?";    p.append(market_id)
-    if start_date:   q += " AND pr.price_date>=?";  p.append(start_date)
-    if end_date:     q += " AND pr.price_date<=?";  p.append(end_date)
-    q += " ORDER BY pr.price_date DESC"
-    c = _conn()
-    try:
-        return pd.read_sql_query(q, c, params=p)
-    finally:
-        c.close()
+def _join_prices(df):
+    if df.empty: return df
+    c = read_commodities()
+    m = read_markets()
+    df = df.merge(c[["id","name","category","unit"]].rename(columns={"id":"commodity_id","name":"commodity_name"}), on="commodity_id", how="left")
+    df = df.merge(m[["id","market_name","state","district"]].rename(columns={"id":"market_id"}), on="market_id", how="left")
+    return df
 
-def delete_price_record(record_id: int):
-    c = _conn()
-    try:
-        c.execute("DELETE FROM price_records WHERE id=?", (record_id,))
-    finally:
-        c.close()
+def read_prices(commodity_id=None, market_id=None, start_date=None, end_date=None) -> pd.DataFrame:
+    df = _lp()
+    if df.empty: return df
+    if commodity_id: df=df[df["commodity_id"]==int(commodity_id)]
+    if market_id:    df=df[df["market_id"]==int(market_id)]
+    if start_date:   df=df[df["price_date"]>=str(start_date)]
+    if end_date:     df=df[df["price_date"]<=str(end_date)]
+    return _join_prices(df).sort_values("price_date", ascending=False).reset_index(drop=True)
 
+def delete_price_record(record_id): pass
 
 # ── Anomalies ─────────────────────────────────────────────────────────────────
-
 def save_anomaly(commodity_id, market_id, detected_date, anomaly_type,
                  severity, deviation_pct, description, price_record_id=None):
-    c = _conn()
-    try:
-        c.execute("""INSERT INTO anomalies
-            (price_record_id,commodity_id,market_id,detected_date,
-             anomaly_type,severity,deviation_pct,description)
-            VALUES (?,?,?,?,?,?,?,?)""",
-            (price_record_id, commodity_id, market_id, detected_date,
-             anomaly_type, severity, deviation_pct, description))
-    finally:
-        c.close()
+    d = _rj("anomalies.json", [])
+    d.append({"commodity_id":int(commodity_id),"market_id":int(market_id),
+              "detected_date":str(detected_date),"anomaly_type":anomaly_type,
+              "severity":severity,"deviation_pct":float(deviation_pct or 0),
+              "description":description})
+    _wj("anomalies.json", d[-500:])
 
-def read_anomalies(days: int = 30) -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("""
-            SELECT a.*, c.name AS commodity_name, m.market_name, m.state
-            FROM anomalies a
-            JOIN commodities c ON a.commodity_id=c.id
-            JOIN markets m     ON a.market_id=m.id
-            WHERE a.detected_date >= date('now',?)
-            ORDER BY a.detected_date DESC
-        """, c, params=[f"-{days} days"])
-    finally:
-        c.close()
-
+def read_anomalies(days=30) -> pd.DataFrame:
+    d = _rj("anomalies.json", [])
+    if not d: return pd.DataFrame()
+    df = pd.DataFrame(d)
+    df = df[df["detected_date"]>=str(date.today()-timedelta(days=days))]
+    if df.empty: return df
+    c = read_commodities(); m = read_markets()
+    df = df.merge(c[["id","name"]].rename(columns={"id":"commodity_id","name":"commodity_name"}), on="commodity_id", how="left")
+    df = df.merge(m[["id","market_name","state"]].rename(columns={"id":"market_id"}), on="market_id", how="left")
+    return df.sort_values("detected_date", ascending=False).reset_index(drop=True)
 
 # ── Forecasts ─────────────────────────────────────────────────────────────────
-
 def save_forecast(commodity_id, market_id, forecast_date, predicted_price,
-                  lower_bound=None, upper_bound=None,
-                  model_name="RandomForest", confidence=None):
-    c = _conn()
-    try:
-        c.execute("""INSERT INTO forecasts
-            (commodity_id,market_id,forecast_date,predicted_price,
-             lower_bound,upper_bound,model_name,confidence)
-            VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(commodity_id,market_id,forecast_date) DO UPDATE SET
-                predicted_price=excluded.predicted_price,
-                lower_bound=excluded.lower_bound,
-                upper_bound=excluded.upper_bound""",
-            (commodity_id, market_id, forecast_date, predicted_price,
-             lower_bound, upper_bound, model_name, confidence))
-    finally:
-        c.close()
+                  lower_bound=None, upper_bound=None, model_name="RandomForest", confidence=None):
+    d = _rj("forecasts.json", [])
+    k = f"{commodity_id}_{market_id}_{forecast_date}"
+    d = [x for x in d if f"{x['commodity_id']}_{x['market_id']}_{x['forecast_date']}"!=k]
+    d.append({"commodity_id":int(commodity_id),"market_id":int(market_id),
+              "forecast_date":str(forecast_date),"predicted_price":float(predicted_price),
+              "lower_bound":float(lower_bound or predicted_price*0.95),
+              "upper_bound":float(upper_bound or predicted_price*1.05),
+              "model_name":model_name,"confidence":float(confidence or 0)})
+    _wj("forecasts.json", d[-1000:])
 
 def read_forecasts(commodity_id=None, market_id=None) -> pd.DataFrame:
-    q = """SELECT f.*, c.name AS commodity_name, m.market_name, m.state
-           FROM forecasts f
-           JOIN commodities c ON f.commodity_id=c.id
-           JOIN markets m     ON f.market_id=m.id
-           WHERE f.forecast_date >= date('now')"""
-    p = []
-    if commodity_id: q += " AND f.commodity_id=?"; p.append(commodity_id)
-    if market_id:    q += " AND f.market_id=?";    p.append(market_id)
-    q += " ORDER BY f.forecast_date"
-    c = _conn()
-    try:
-        return pd.read_sql_query(q, c, params=p)
-    finally:
-        c.close()
-
+    d = _rj("forecasts.json", [])
+    if not d: return pd.DataFrame()
+    df = pd.DataFrame(d)
+    df = df[df["forecast_date"]>=str(date.today())]
+    if commodity_id: df=df[df["commodity_id"]==int(commodity_id)]
+    if market_id:    df=df[df["market_id"]==int(market_id)]
+    c = read_commodities(); m = read_markets()
+    df = df.merge(c[["id","name"]].rename(columns={"id":"commodity_id","name":"commodity_name"}), on="commodity_id", how="left")
+    df = df.merge(m[["id","market_name","state"]].rename(columns={"id":"market_id"}), on="market_id", how="left")
+    return df.sort_values("forecast_date").reset_index(drop=True)
 
 # ── AI Insights ───────────────────────────────────────────────────────────────
+def save_insight(commodity_id, market_id, insight_date, insight_type, title, content, sentiment="neutral"):
+    d = _rj("insights.json", [])
+    d.append({"commodity_id":commodity_id,"market_id":market_id,
+              "insight_date":str(insight_date),"insight_type":insight_type,
+              "title":title,"content":content,"sentiment":sentiment})
+    _wj("insights.json", d[-200:])
 
-def save_insight(commodity_id, market_id, insight_date,
-                 insight_type, title, content, sentiment="neutral"):
-    c = _conn()
-    try:
-        c.execute("""INSERT INTO ai_insights
-            (commodity_id,market_id,insight_date,insight_type,title,content,sentiment)
-            VALUES (?,?,?,?,?,?,?)""",
-            (commodity_id, market_id, insight_date,
-             insight_type, title, content, sentiment))
-    finally:
-        c.close()
+def read_insights(days=7) -> pd.DataFrame:
+    d = _rj("insights.json", [])
+    if not d: return pd.DataFrame()
+    df = pd.DataFrame(d)
+    df = df[df["insight_date"]>=str(date.today()-timedelta(days=days))]
+    return df.sort_values("insight_date", ascending=False).reset_index(drop=True)
 
-def read_insights(days: int = 7) -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("""
-            SELECT ai.*, c.name AS commodity_name, m.market_name
-            FROM ai_insights ai
-            LEFT JOIN commodities c ON ai.commodity_id=c.id
-            LEFT JOIN markets m     ON ai.market_id=m.id
-            WHERE ai.insight_date >= date('now',?)
-            ORDER BY ai.created_at DESC
-        """, c, params=[f"-{days} days"])
-    finally:
-        c.close()
-
-
-# ── Scheduler Log ─────────────────────────────────────────────────────────────
-
+# ── Scheduler log ─────────────────────────────────────────────────────────────
 def log_scheduler(job_name, status, records_processed=0, error_message=None):
-    c = _conn()
-    try:
-        c.execute("""INSERT INTO scheduler_log
-            (job_name,status,records_processed,error_message)
-            VALUES (?,?,?,?)""",
-            (job_name, status, records_processed, error_message))
-    finally:
-        c.close()
+    d = _rj("scheduler_log.json", [])
+    d.append({"job_name":job_name,"status":status,"records_processed":records_processed,
+              "error_message":error_message,"executed_at":str(date.today())})
+    _wj("scheduler_log.json", d[-200:])
 
-def read_scheduler_log(limit: int = 50) -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query(
-            f"SELECT * FROM scheduler_log ORDER BY executed_at DESC LIMIT {limit}", c)
-    finally:
-        c.close()
-
+def read_scheduler_log(limit=50) -> pd.DataFrame:
+    d = _rj("scheduler_log.json", [])
+    if not d: return pd.DataFrame()
+    return pd.DataFrame(d[-limit:][::-1])
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
-
 def get_summary_stats() -> Dict[str, Any]:
-    c = _conn()
-    try:
-        return {
-            "total_records":     c.execute("SELECT COUNT(*) FROM price_records").fetchone()[0],
-            "total_commodities": c.execute("SELECT COUNT(*) FROM commodities").fetchone()[0],
-            "total_markets":     c.execute("SELECT COUNT(*) FROM markets").fetchone()[0],
-            "total_states":      c.execute("SELECT COUNT(DISTINCT state) FROM markets").fetchone()[0],
-            "latest_date":       c.execute("SELECT MAX(price_date) FROM price_records").fetchone()[0],
-            "anomalies_30d":     c.execute(
-                "SELECT COUNT(*) FROM anomalies WHERE detected_date >= date('now','-30 days')"
-            ).fetchone()[0],
-        }
-    finally:
-        c.close()
+    prices = _lp()
+    comms  = read_commodities()
+    mkts   = read_markets()
+    anom   = _rj("anomalies.json", [])
+    cutoff = str(date.today()-timedelta(days=30))
+    return {
+        "total_records":     len(prices),
+        "total_commodities": len(comms),
+        "total_markets":     len(mkts),
+        "total_states":      mkts["state"].nunique() if not mkts.empty else 0,
+        "latest_date":       prices["price_date"].max() if not prices.empty else "N/A",
+        "anomalies_30d":     sum(1 for a in anom if a.get("detected_date","")>=cutoff),
+    }
 
 def get_state_analytics() -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("""
-            SELECT m.state,
-                   COUNT(DISTINCT m.id)            AS num_markets,
-                   COUNT(DISTINCT pr.commodity_id) AS num_commodities,
-                   AVG(pr.modal_price)             AS avg_price,
-                   MAX(pr.modal_price)             AS max_price,
-                   MIN(pr.modal_price)             AS min_price,
-                   COUNT(pr.id)                    AS total_records
-            FROM markets m JOIN price_records pr ON m.id=pr.market_id
-            GROUP BY m.state ORDER BY avg_price DESC
-        """, c)
-    finally:
-        c.close()
+    df = read_prices()
+    if df.empty: return pd.DataFrame()
+    return (df.groupby("state")
+              .agg(num_markets=("market_name","nunique"),
+                   num_commodities=("commodity_name","nunique"),
+                   avg_price=("modal_price","mean"),
+                   max_price=("modal_price","max"),
+                   min_price=("modal_price","min"),
+                   total_records=("modal_price","count"))
+              .reset_index().sort_values("avg_price", ascending=False))
 
-def get_top_commodities_by_volatility(limit: int = 10) -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("""
-            SELECT c.name AS commodity_name, c.category,
-                   AVG(pr.modal_price) AS avg_price,
-                   (MAX(pr.modal_price)-MIN(pr.modal_price))
-                       /NULLIF(AVG(pr.modal_price),0)*100 AS volatility_pct,
-                   COUNT(pr.id) AS records
-            FROM commodities c JOIN price_records pr ON c.id=pr.commodity_id
-            GROUP BY c.id HAVING records>5
-            ORDER BY volatility_pct DESC LIMIT ?
-        """, c, params=[limit])
-    finally:
-        c.close()
+def get_top_commodities_by_volatility(limit=10) -> pd.DataFrame:
+    df = read_prices()
+    if df.empty: return pd.DataFrame()
+    g = (df.groupby(["commodity_name","category"])["modal_price"]
+           .agg(avg_price="mean", max_p="max", min_p="min", records="count").reset_index())
+    g = g[g["records"]>5].copy()
+    g["volatility_pct"] = (g["max_p"]-g["min_p"])/g["avg_price"].replace(0,1)*100
+    return g.sort_values("volatility_pct", ascending=False).head(limit).reset_index(drop=True)
 
 def get_price_trend(commodity_id: int, market_id: int, days: int = 90) -> pd.DataFrame:
-    c = _conn()
-    try:
-        return pd.read_sql_query("""
-            SELECT price_date,min_price,max_price,modal_price,arrivals
-            FROM price_records
-            WHERE commodity_id=? AND market_id=?
-              AND price_date >= date('now',?)
-            ORDER BY price_date
-        """, c, params=[commodity_id, market_id, f"-{days} days"])
-    finally:
-        c.close()
+    df = _lp()
+    if df.empty: return pd.DataFrame()
+    cutoff = str(date.today()-timedelta(days=days))
+    df = df[(df["commodity_id"]==int(commodity_id))&
+            (df["market_id"]==int(market_id))&
+            (df["price_date"]>=cutoff)]
+    return df[["price_date","min_price","max_price","modal_price","arrivals"]]\
+             .sort_values("price_date").reset_index(drop=True)
 
-def get_connection():
-    """Public alias used by other modules."""
-    return _conn()
+def get_connection(): return None
