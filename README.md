@@ -274,6 +274,10 @@ Full docs: http://localhost:8000/docs
 
 ---
 
+## Contact
+Rohith Kumar V 
+Linkedin:https://www.linkedin.com/in/rohith-kumar-rk/
+
 ## 📄 License
 
 MIT License — free to use, modify, and distribute.
