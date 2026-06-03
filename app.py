@@ -16,8 +16,9 @@ from database import (
     get_price_trend, read_scheduler_log, get_meta, set_meta,
 )
 from data_pipeline import fetch_and_store_prices, seed_reference_data
-from ml_models import forecast_prices, detect_anomalies
+from ml_models import detect_anomalies
 from ai_insights import generate_price_movement_insight
+from database import bulk_insert_prices
 
 # ── Page Setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -27,123 +28,197 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── CSS — clean, large text, green farm theme ─────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-html, body, [class*="css"] { font-family: 'Poppins', sans-serif; }
-.stApp { background: #f0f7f0; }
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
 
-/* Top hero banner */
-.hero {
-    background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 50%, #388e3c 100%);
+/* ── App background ── */
+.stApp {
+    background: #0f1117;
+}
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {
+    background: #161b27 !important;
+    border-right: 1px solid #1e2d40;
+}
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div {
+    color: #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] .stSelectbox > div > div {
+    background: #1e2d40 !important;
+    border: 1px solid #2d4a6b !important;
+    color: #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] .stButton > button {
+    background: #16a34a !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+    background: #15803d !important;
+}
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #161b27;
+    border-radius: 10px;
+    padding: 4px;
+    gap: 4px;
+    border: 1px solid #1e2d40;
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent;
+    color: #94a3b8;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 0.9rem;
+    padding: 8px 18px;
+    border: none;
+}
+.stTabs [aria-selected="true"] {
+    background: #16a34a !important;
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+/* ── Dataframe ── */
+.stDataFrame { background: #161b27; border-radius: 10px; }
+iframe[title="st_aggrid"] { background: #161b27; }
+
+/* ── Metric cards ── */
+[data-testid="metric-container"] {
+    background: #161b27;
+    border: 1px solid #1e2d40;
+    border-radius: 12px;
+    padding: 16px;
+}
+[data-testid="metric-container"] label { color: #94a3b8 !important; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { color: #f1f5f9 !important; }
+
+/* ── Custom cards ── */
+.hero-card {
+    background: linear-gradient(135deg, #052e16 0%, #14532d 50%, #166534 100%);
     border-radius: 16px;
     padding: 28px 32px;
     margin-bottom: 24px;
-    color: white;
+    border: 1px solid #16a34a;
 }
-.hero h1 { font-size: 2rem; font-weight: 700; margin: 0; }
-.hero p  { font-size: 1rem; margin: 6px 0 0; opacity: 0.9; }
+.hero-card h1 { font-size: 1.9rem; font-weight: 800; color: #f0fdf4; margin: 0; }
+.hero-card p  { font-size: 0.95rem; color: #86efac; margin: 6px 0 0; }
 
-/* Big price card */
+.kpi-card {
+    background: #161b27;
+    border: 1px solid #1e2d40;
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+}
+.kpi-val   { font-size: 2rem; font-weight: 700; color: #4ade80; }
+.kpi-label { font-size: 0.78rem; color: #64748b; text-transform: uppercase;
+             letter-spacing: 0.8px; margin-top: 4px; }
+
 .price-card {
-    background: white;
+    background: #161b27;
+    border: 1px solid #1e2d40;
     border-radius: 14px;
     padding: 22px 18px;
     text-align: center;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-    border-top: 5px solid #2e7d32;
+    border-top: 4px solid #16a34a;
     margin-bottom: 12px;
 }
-.price-main  { font-size: 2.4rem; font-weight: 700; color: #1b5e20; }
-.price-label { font-size: 0.9rem; color: #666; margin-top: 4px; }
-.price-change-up   { color: #d32f2f; font-weight: 600; font-size: 1rem; }
-.price-change-down { color: #388e3c; font-weight: 600; font-size: 1rem; }
+.price-main  { font-size: 2.3rem; font-weight: 800; color: #4ade80; }
+.price-label { font-size: 0.85rem; color: #64748b; margin-top: 4px; }
+.price-up    { color: #f87171; font-weight: 600; font-size: 0.95rem; margin-top: 8px; }
+.price-down  { color: #4ade80; font-weight: 600; font-size: 0.95rem; margin-top: 8px; }
 
-/* Alert cards */
-.alert-high { background:#fff3e0; border-left:5px solid #f57c00; border-radius:10px; padding:14px; margin:8px 0; }
-.alert-low  { background:#e8f5e9; border-left:5px solid #388e3c; border-radius:10px; padding:14px; margin:8px 0; }
-.alert-warn { background:#fce4ec; border-left:5px solid #c62828; border-radius:10px; padding:14px; margin:8px 0; }
+.section-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #f1f5f9;
+    margin: 24px 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #16a34a;
+}
 
-/* Tip box */
 .tip-box {
-    background: #e8f5e9;
-    border: 1px solid #a5d6a7;
+    background: #052e16;
+    border: 1px solid #16a34a;
     border-radius: 10px;
     padding: 14px 18px;
     margin: 10px 0;
-    font-size: 0.92rem;
-    color: #1b5e20;
+    font-size: 0.9rem;
+    color: #86efac;
 }
-
-/* Section titles */
-.section-title {
-    font-size: 1.3rem;
-    font-weight: 700;
-    color: #1b5e20;
-    margin: 20px 0 12px;
-    padding-bottom: 6px;
-    border-bottom: 3px solid #a5d6a7;
-}
-
-/* Status badge */
-.badge-live   { background:#e8f5e9; color:#2e7d32; padding:4px 10px; border-radius:20px; font-size:0.8rem; font-weight:600; }
-.badge-synth  { background:#fff8e1; color:#f57f17; padding:4px 10px; border-radius:20px; font-size:0.8rem; font-weight:600; }
-.badge-new    { background:#e3f2fd; color:#1565c0; padding:4px 10px; border-radius:20px; font-size:0.8rem; font-weight:600; }
-
-/* Sidebar */
-section[data-testid="stSidebar"] { background: #1b5e20 !important; }
-section[data-testid="stSidebar"] * { color: white !important; }
-section[data-testid="stSidebar"] .stSelectbox > div > div { background: #2e7d32 !important; color: white !important; }
-
-/* Forecast table */
-.forecast-row { padding: 10px; border-bottom: 1px solid #e0e0e0; }
-.forecast-date { font-weight:600; color:#333; }
-.forecast-price { font-size:1.1rem; font-weight:700; color:#1b5e20; }
-.forecast-range { font-size:0.82rem; color:#888; }
-
-/* Update status */
-.update-status {
-    background: white;
+.alert-sell {
+    background: #052e16;
+    border-left: 4px solid #4ade80;
     border-radius: 10px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-    border: 1px solid #c8e6c9;
-    font-size:0.88rem;
+    padding: 14px 18px;
+    margin: 10px 0;
+    color: #86efac;
+    font-size: 0.9rem;
+}
+.alert-wait {
+    background: #2d1515;
+    border-left: 4px solid #f87171;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 10px 0;
+    color: #fca5a5;
+    font-size: 0.9rem;
+}
+.alert-warn {
+    background: #1c1208;
+    border-left: 4px solid #fb923c;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 10px 0;
+    color: #fdba74;
+    font-size: 0.9rem;
+}
+.anomaly-card {
+    background: #161b27;
+    border: 1px solid #1e2d40;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 8px 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Init DB ───────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Setting up database — please wait...")
+# ── Chart theme — dark ────────────────────────────────────────────────────────
+CHART = dict(
+    paper_bgcolor="#161b27",
+    plot_bgcolor="#0f1117",
+    font=dict(color="#94a3b8", size=12),
+    xaxis=dict(gridcolor="#1e2d40", linecolor="#1e2d40", zerolinecolor="#1e2d40"),
+    yaxis=dict(gridcolor="#1e2d40", linecolor="#1e2d40", zerolinecolor="#1e2d40"),
+    legend=dict(bgcolor="#161b27", bordercolor="#1e2d40"),
+)
+
+# ── Boot / seed ───────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner="🌱 Loading market data — first run takes ~20s...")
 def boot():
-    """
-    Runs ONCE per server session (cached by Streamlit).
-    1. Init DB tables
-    2. Seed commodities + markets if empty
-    3. Generate 120-day synthetic price history if empty
-    Never runs again until the server restarts.
-    """
     import numpy as np
     from datetime import date, timedelta
-
     init_db()
-
-    # Check if already seeded using app_meta flag
-    from database import get_meta, set_meta
-    already_seeded = get_meta("seeded")
-    if already_seeded == "true":
+    if get_meta("seeded") == "true":
         return True
-
-    # Seed reference data (commodities + markets)
     seed_reference_data()
-
-    # Fast vectorized synthetic seed — 120 days of history
-    from database import read_commodities, read_markets
     comms_df = read_commodities()
     mkts_df  = read_markets()
-
     BASE_PRICES = {
         "Rice":2200,"Wheat":2100,"Maize":1800,"Barley":1700,"Jowar":2000,"Bajra":1900,"Ragi":2300,
         "Tur Dal":8500,"Moong Dal":9500,"Urad Dal":9000,"Chana Dal":7000,"Masoor Dal":7500,
@@ -153,140 +228,133 @@ def boot():
         "Turmeric":8000,"Chilli":12000,"Coriander":7000,"Cumin":18000,"Ginger":6000,"Garlic":12000,
         "Groundnut":5500,"Mustard":5200,"Soybean":4800,"Sunflower":5000,"Sesame":9000,
     }
-    MARKET_PREMIUM = {
-        "Azadpur":1.05,"Vashi":1.08,"Bowenpally":0.97,
-        "Koyambedu":1.02,"Yeshwanthpur":1.06,"Gultekdi":1.04,
-    }
-
+    PREMIUM = {"Azadpur":1.05,"Vashi":1.08,"Bowenpally":0.97,"Koyambedu":1.02,"Yeshwanthpur":1.06,"Gultekdi":1.04}
     days_back = 120
-    today     = date.today()
-    dates     = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days_back)]
-
+    today = date.today()
+    dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days_back)]
     records = []
     rng = np.random.default_rng(42)
     for _, c in comms_df.iterrows():
         base = BASE_PRICES.get(c["name"], 2000)
         for _, m in mkts_df.iterrows():
             doys     = np.array([(today-timedelta(days=i)).timetuple().tm_yday for i in range(days_back)])
-            seasonal = 1.0 + 0.15 * np.sin(2 * np.pi * (doys - 90) / 365)
+            seasonal = 1.0 + 0.15*np.sin(2*np.pi*(doys-90)/365)
             noise    = rng.normal(0, 0.03, days_back)
-            premium  = MARKET_PREMIUM.get(m["market_name"], 1.0)
-            modal    = np.round(base * seasonal * premium * (1 + noise), 2)
+            premium  = PREMIUM.get(m["market_name"], 1.0)
+            modal    = np.round(base*seasonal*premium*(1+noise), 2)
             spread   = rng.uniform(0.03, 0.07, days_back)
-            min_p    = np.round(modal * (1 - spread), 2)
-            max_p    = np.round(modal * (1 + spread), 2)
+            min_p    = np.round(modal*(1-spread), 2)
+            max_p    = np.round(modal*(1+spread), 2)
             arrivals = np.round(rng.uniform(50, 500, days_back), 1)
             for i, d in enumerate(dates):
-                records.append((
-                    int(c["id"]), int(m["id"]), d,
-                    float(min_p[i]), float(max_p[i]), float(modal[i]),
-                    float(arrivals[i]), "Synthetic"
-                ))
-
-    from database import bulk_insert_prices
+                records.append((int(c["id"]),int(m["id"]),d,
+                                float(min_p[i]),float(max_p[i]),float(modal[i]),
+                                float(arrivals[i]),"Synthetic"))
     bulk_insert_prices(records)
-
-    # Mark as seeded so we never run this again
-    set_meta("seeded", "true")
+    set_meta("seeded","true")
     set_meta("seed_date", str(date.today()))
     return True
 
 boot()
 
-# ── Load reference data ───────────────────────────────────────────────────────
+# ── Load data ─────────────────────────────────────────────────────────────────
 commodities_df = read_commodities()
 markets_df     = read_markets()
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🌾 Agri Price Tracker")
-    st.markdown("**Daily crop prices from every mandi**")
-    st.markdown("---")
+    st.markdown("""
+    <div style="padding:16px 0 10px; text-align:center;">
+        <div style="font-size:2rem">🌾</div>
+        <div style="font-size:1.1rem; font-weight:700; color:#4ade80;">Agri Price Tracker</div>
+        <div style="font-size:0.75rem; color:#64748b; margin-top:2px;">Live Commodity Prices</div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.divider()
 
-    st.markdown("### 🔍 Select Crop")
+    st.markdown("#### 🌿 Select Crop")
     categories = sorted(commodities_df["category"].unique().tolist()) if not commodities_df.empty else []
-    sel_cat = st.selectbox("Category", ["All"] + categories)
+    sel_cat = st.selectbox("Category", ["All"] + categories, label_visibility="collapsed")
+    comm_list = (commodities_df[commodities_df["category"]==sel_cat]["name"].tolist()
+                 if sel_cat != "All" else commodities_df["name"].tolist())
+    sel_commodity = st.selectbox("Commodity", comm_list, label_visibility="collapsed") if comm_list else None
 
-    if sel_cat != "All":
-        comm_list = commodities_df[commodities_df["category"] == sel_cat]["name"].tolist()
-    else:
-        comm_list = commodities_df["name"].tolist()
-
-    sel_commodity = st.selectbox("Commodity", comm_list) if comm_list else None
-
-    st.markdown("### 📍 Select Market")
+    st.markdown("#### 📍 Select Market")
     states = sorted(markets_df["state"].unique().tolist()) if not markets_df.empty else []
-    sel_state = st.selectbox("State", ["All"] + states)
+    sel_state = st.selectbox("State", ["All"] + states, label_visibility="collapsed")
+    mkt_list = (markets_df[markets_df["state"]==sel_state]["market_name"].tolist()
+                if sel_state != "All" else markets_df["market_name"].tolist())
+    sel_market = st.selectbox("Market", mkt_list, label_visibility="collapsed") if mkt_list else None
 
-    if sel_state != "All":
-        mkt_list = markets_df[markets_df["state"] == sel_state]["market_name"].tolist()
-    else:
-        mkt_list = markets_df["market_name"].tolist()
+    st.divider()
+    st.markdown("#### 📅 Date Range")
+    days = st.select_slider("Days", options=[7,14,30,60,90], value=30, label_visibility="collapsed")
 
-    sel_market = st.selectbox("Market", mkt_list) if mkt_list else None
-
-    st.markdown("---")
-    st.markdown("### 📅 Date Range")
-    days = st.select_slider(
-        "Days to show",
-        options=[7, 14, 30, 60, 90],
-        value=30
-    )
-
-    st.markdown("---")
+    st.divider()
     if st.button("🔄 Refresh Prices", use_container_width=True):
-        with st.spinner("Fetching latest prices..."):
+        with st.spinner("Fetching..."):
             count = fetch_and_store_prices(days_back=2)
-            st.success(f"✓ Updated {count} records")
+            st.success(f"✓ {count} records updated")
         st.rerun()
 
-    # Data freshness indicator
-    stats = get_summary_stats()
-    latest = stats.get("latest_date", "N/A")
-    today  = date.today().isoformat()
-    fresh  = "🟢 Today's data" if latest == today else f"🟡 Last: {latest}"
-    st.markdown(f"**Data Status:** {fresh}")
+    stats_s = get_summary_stats()
+    latest  = stats_s.get("latest_date","N/A")
+    is_fresh = latest == date.today().isoformat()
+    st.markdown(
+        f"<div style='text-align:center; margin-top:8px; font-size:0.8rem;'>"
+        f"{'🟢 Live data today' if is_fresh else f'🟡 Last: {latest}'}</div>",
+        unsafe_allow_html=True
+    )
 
-# ── Resolve IDs ───────────────────────────────────────────────────────────────
+# ── IDs ───────────────────────────────────────────────────────────────────────
 def get_id(df, col, val):
     rows = df[df[col] == val]
     return int(rows["id"].iloc[0]) if not rows.empty else None
 
 commodity_id = get_id(commodities_df, "name", sel_commodity) if sel_commodity else None
-market_id    = get_id(markets_df, "market_name", sel_market) if sel_market else None
+market_id    = get_id(markets_df, "market_name", sel_market)  if sel_market    else None
 
-# ── HERO BANNER ───────────────────────────────────────────────────────────────
+# ── HERO ──────────────────────────────────────────────────────────────────────
 stats = get_summary_stats()
-latest_date = stats.get("latest_date", "N/A")
-is_today    = latest_date == date.today().isoformat()
-data_badge  = "🟢 Live — Today's Data" if is_today else f"🟡 Last Updated: {latest_date}"
+latest_date = stats.get("latest_date","N/A")
+badge = "🟢 Live — Today's Data" if latest_date == date.today().isoformat() else f"🟡 Last Updated: {latest_date}"
 
 st.markdown(f"""
-<div class="hero">
+<div class="hero-card">
   <h1>🌾 Agri Price Tracker</h1>
-  <p>Live commodity prices from Agmarknet · ML forecasting · Daily alerts</p>
-  <p style="margin-top:10px; font-size:0.85rem; opacity:0.8">{data_badge} &nbsp;|&nbsp;
-     {stats['total_commodities']} Commodities &nbsp;|&nbsp;
-     {stats['total_markets']} Mandis &nbsp;|&nbsp;
-     {stats['total_states']} States</p>
+  <p>Live commodity prices from Agmarknet &nbsp;·&nbsp; Anomaly detection &nbsp;·&nbsp; State analytics</p>
+  <p style="margin-top:12px; font-size:0.82rem; color:#6ee7b7;">
+    {badge} &nbsp;|&nbsp; {stats['total_commodities']} Commodities &nbsp;|&nbsp;
+    {stats['total_markets']} Mandis &nbsp;|&nbsp; {stats['total_states']} States
+  </p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── MAIN TABS ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+# ── KPI row ───────────────────────────────────────────────────────────────────
+k1,k2,k3,k4,k5,k6 = st.columns(6)
+def kpi(col, val, label):
+    col.markdown(f"""
+    <div class="kpi-card">
+      <div class="kpi-val">{val}</div>
+      <div class="kpi-label">{label}</div>
+    </div>""", unsafe_allow_html=True)
+
+kpi(k1, f"{stats['total_records']:,}", "Price Records")
+kpi(k2, stats['total_commodities'],    "Commodities")
+kpi(k3, stats['total_markets'],        "Markets")
+kpi(k4, stats['total_states'],         "States")
+kpi(k5, stats['anomalies_30d'],        "Alerts 30d")
+kpi(k6, latest_date,                   "Latest Data")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ── TABS — 4 only (forecast removed) ─────────────────────────────────────────
+tab1, tab2, tab3, tab4 = st.tabs([
     "💰 Today's Price",
     "📈 Price Trend",
-    "🔮 Price Forecast",
     "⚠️ Price Alerts",
     "🗺️ All States",
 ])
-
-CHART_STYLE = dict(
-    paper_bgcolor="white", plot_bgcolor="#f9fbe7",
-    font=dict(color="#1b5e20", size=13),
-    xaxis=dict(gridcolor="#e8f5e9"),
-    yaxis=dict(gridcolor="#e8f5e9"),
-)
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 1 — TODAY'S PRICE
@@ -294,131 +362,122 @@ CHART_STYLE = dict(
 with tab1:
     if commodity_id and market_id:
         trend = get_price_trend(commodity_id, market_id, days=days)
-
         if not trend.empty:
             trend["price_date"] = pd.to_datetime(trend["price_date"])
             trend = trend.sort_values("price_date")
 
-            latest_row  = trend.iloc[-1]
-            prev_row    = trend.iloc[-2] if len(trend) > 1 else latest_row
-            week_row    = trend.iloc[-7] if len(trend) >= 7 else trend.iloc[0]
+            latest_row = trend.iloc[-1]
+            prev_row   = trend.iloc[-2] if len(trend) > 1 else latest_row
+            week_row   = trend.iloc[-7] if len(trend) >= 7 else trend.iloc[0]
 
             modal  = latest_row["modal_price"]
             min_p  = latest_row["min_price"]
             max_p  = latest_row["max_price"]
             chg_1d = modal - prev_row["modal_price"]
             chg_7d = modal - week_row["modal_price"]
-            chg_1d_pct = chg_1d / prev_row["modal_price"] * 100
-            chg_7d_pct = chg_7d / week_row["modal_price"] * 100
-
+            chg_pct_1d = chg_1d / prev_row["modal_price"] * 100
             arrow_1d = "▲" if chg_1d >= 0 else "▼"
-            arrow_7d = "▲" if chg_7d >= 0 else "▼"
-            cls_1d   = "price-change-up" if chg_1d >= 0 else "price-change-down"
-            cls_7d   = "price-change-up" if chg_7d >= 0 else "price-change-down"
+            cls_1d   = "price-up" if chg_1d >= 0 else "price-down"
 
-            # Big price cards
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.markdown(f"""
                 <div class="price-card">
-                  <div class="price-label">Today's Price</div>
+                  <div class="price-label">Today's Modal Price</div>
                   <div class="price-main">₹{modal:,.0f}</div>
                   <div class="price-label">per Quintal (100 kg)</div>
-                  <div class="{cls_1d}" style="margin-top:8px">
-                    {arrow_1d} ₹{abs(chg_1d):,.0f} ({chg_1d_pct:+.1f}%) from yesterday
-                  </div>
+                  <div class="{cls_1d}">{arrow_1d} ₹{abs(chg_1d):,.0f} ({chg_pct_1d:+.1f}%) from yesterday</div>
                 </div>""", unsafe_allow_html=True)
             with c2:
                 st.markdown(f"""
-                <div class="price-card" style="border-top-color:#f57c00">
-                  <div class="price-label">Minimum</div>
-                  <div class="price-main" style="color:#e65100">₹{min_p:,.0f}</div>
-                  <div class="price-label">Lowest price today</div>
-                  <div style="margin-top:8px; color:#888; font-size:0.85rem">
+                <div class="price-card" style="border-top-color:#f97316">
+                  <div class="price-label">Minimum Price</div>
+                  <div class="price-main" style="color:#fb923c">₹{min_p:,.0f}</div>
+                  <div class="price-label">Lowest today</div>
+                  <div style="color:#64748b; font-size:0.82rem; margin-top:8px">
                     ₹{trend['min_price'].min():,.0f} lowest in {days}d
                   </div>
                 </div>""", unsafe_allow_html=True)
             with c3:
                 st.markdown(f"""
-                <div class="price-card" style="border-top-color:#1565c0">
-                  <div class="price-label">Maximum</div>
-                  <div class="price-main" style="color:#1565c0">₹{max_p:,.0f}</div>
-                  <div class="price-label">Highest price today</div>
-                  <div style="margin-top:8px; color:#888; font-size:0.85rem">
+                <div class="price-card" style="border-top-color:#60a5fa">
+                  <div class="price-label">Maximum Price</div>
+                  <div class="price-main" style="color:#60a5fa">₹{max_p:,.0f}</div>
+                  <div class="price-label">Highest today</div>
+                  <div style="color:#64748b; font-size:0.82rem; margin-top:8px">
                     ₹{trend['max_price'].max():,.0f} highest in {days}d
                   </div>
                 </div>""", unsafe_allow_html=True)
 
-            # Farmer tip
+            # Sell tip
             avg_30 = trend["modal_price"].mean()
             if modal > avg_30 * 1.1:
-                tip_msg = f"💡 <b>Good time to sell!</b> Today's price ₹{modal:,.0f} is {((modal/avg_30)-1)*100:.0f}% ABOVE the {days}-day average (₹{avg_30:,.0f}). Consider selling now."
-                tip_cls = "alert-low"
+                st.markdown(f"""<div class="alert-sell">
+                💡 <b>Good time to sell!</b> Today ₹{modal:,.0f} is
+                {((modal/avg_30)-1)*100:.0f}% ABOVE the {days}-day average (₹{avg_30:,.0f}).
+                </div>""", unsafe_allow_html=True)
             elif modal < avg_30 * 0.9:
-                tip_msg = f"⚠️ <b>Prices are low.</b> Today's price ₹{modal:,.0f} is {((1-(modal/avg_30))*100):.0f}% BELOW the {days}-day average (₹{avg_30:,.0f}). Consider waiting if possible."
-                tip_cls = "alert-high"
+                st.markdown(f"""<div class="alert-wait">
+                ⚠️ <b>Prices are low.</b> Today ₹{modal:,.0f} is
+                {((1-modal/avg_30)*100):.0f}% BELOW the {days}-day average (₹{avg_30:,.0f}).
+                Consider waiting if you can store.
+                </div>""", unsafe_allow_html=True)
             else:
-                tip_msg = f"📊 <b>Prices are normal.</b> Today's ₹{modal:,.0f} is near the {days}-day average (₹{avg_30:,.0f}). Monitor daily for changes."
-                tip_cls = "tip-box"
-            st.markdown(f'<div class="{tip_cls}">{tip_msg}</div>', unsafe_allow_html=True)
+                st.markdown(f"""<div class="tip-box">
+                📊 <b>Prices are stable.</b> Today ₹{modal:,.0f} is near the
+                {days}-day average (₹{avg_30:,.0f}).
+                </div>""", unsafe_allow_html=True)
 
-            # 7-day mini table
+            # Last 7 days table
             st.markdown('<div class="section-title">📅 Last 7 Days</div>', unsafe_allow_html=True)
             last7 = trend.tail(7).copy().sort_values("price_date", ascending=False)
-            last7["Date"]          = last7["price_date"].dt.strftime("%d %b %Y")
-            last7["Modal (₹/Qt)"]  = last7["modal_price"].apply(lambda x: f"₹{x:,.0f}")
-            last7["Min (₹/Qt)"]    = last7["min_price"].apply(lambda x: f"₹{x:,.0f}")
-            last7["Max (₹/Qt)"]    = last7["max_price"].apply(lambda x: f"₹{x:,.0f}")
-            last7["Change"]        = last7["modal_price"].diff(-1).apply(
+            last7["Date"]         = last7["price_date"].dt.strftime("%d %b %Y")
+            last7["Modal (₹/Qt)"] = last7["modal_price"].apply(lambda x: f"₹{x:,.0f}")
+            last7["Min (₹/Qt)"]   = last7["min_price"].apply(lambda x: f"₹{x:,.0f}")
+            last7["Max (₹/Qt)"]   = last7["max_price"].apply(lambda x: f"₹{x:,.0f}")
+            last7["Change"]       = last7["modal_price"].diff(-1).apply(
                 lambda x: f"▲ ₹{abs(x):,.0f}" if x > 0 else (f"▼ ₹{abs(x):,.0f}" if x < 0 else "—") if pd.notna(x) else "—"
             )
-            st.dataframe(
-                last7[["Date","Modal (₹/Qt)","Min (₹/Qt)","Max (₹/Qt)","Change"]],
-                use_container_width=True, hide_index=True
-            )
+            st.dataframe(last7[["Date","Modal (₹/Qt)","Min (₹/Qt)","Max (₹/Qt)","Change"]],
+                         use_container_width=True, hide_index=True)
 
-            # Arrivals & price today bar
-            st.markdown(f'<div class="section-title">🚛 Market Arrivals — {sel_market}</div>', unsafe_allow_html=True)
-            fig_arr = go.Figure()
-            fig_arr.add_trace(go.Bar(
+            # Arrivals chart
+            st.markdown(f'<div class="section-title">🚛 Market Arrivals — {sel_market}</div>',
+                        unsafe_allow_html=True)
+            fig_arr = go.Figure(go.Bar(
                 x=trend["price_date"], y=trend["arrivals"],
-                marker_color="#81c784", name="Arrivals (Quintals)"
+                marker_color="#16a34a", marker_line_width=0,
+                name="Arrivals (Qt)"
             ))
             fig_arr.update_layout(
-                yaxis_title="Arrivals (Qt)", xaxis_title="Date",
-                height=220, margin=dict(t=10, b=10), **CHART_STYLE
+                yaxis_title="Arrivals (Quintals)", xaxis_title="Date",
+                height=240, margin=dict(t=10, b=10), **CHART
             )
             st.plotly_chart(fig_arr, use_container_width=True)
 
         else:
-            st.info("No price data for this selection. Click 'Refresh' in the sidebar.")
+            st.info("No data for this selection. Click 🔄 Refresh in the sidebar.")
     else:
-        # Landing state — show top movers
-        st.markdown('<div class="section-title">📊 Top Commodity Prices</div>', unsafe_allow_html=True)
-        st.markdown("**👈 Select a commodity and market from the sidebar to see detailed prices.**")
-
+        st.markdown('<div class="section-title">📊 Overview — All Commodities</div>',
+                    unsafe_allow_html=True)
+        st.markdown("<p style='color:#64748b'>👈 Select a commodity and market from the sidebar.</p>",
+                    unsafe_allow_html=True)
         vol_df = get_top_commodities_by_volatility(12)
         if not vol_df.empty:
-            col_a, col_b = st.columns(2)
-            with col_a:
-                fig = px.bar(
-                    vol_df.sort_values("avg_price", ascending=True).head(10),
-                    x="avg_price", y="commodity_name", orientation="h",
-                    color="category", title="Average Prices (₹/Quintal)",
-                    labels={"avg_price":"Price (₹)", "commodity_name":"Commodity"},
-                    color_discrete_sequence=px.colors.qualitative.Set2,
-                )
-                fig.update_layout(height=350, **CHART_STYLE, showlegend=False)
+            c_a, c_b = st.columns(2)
+            with c_a:
+                fig = px.bar(vol_df.sort_values("avg_price", ascending=True).head(10),
+                             x="avg_price", y="commodity_name", orientation="h",
+                             color="category", title="Average Prices (₹/Quintal)",
+                             labels={"avg_price":"Price (₹)","commodity_name":""},
+                             color_discrete_sequence=px.colors.qualitative.Pastel)
+                fig.update_layout(height=360, **CHART, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
-            with col_b:
-                fig2 = px.pie(
-                    commodities_df.groupby("category").size().reset_index(name="count"),
-                    values="count", names="category",
-                    title="Commodities by Category",
-                    color_discrete_sequence=px.colors.qualitative.Set2,
-                    hole=0.4,
-                )
-                fig2.update_layout(height=350, **CHART_STYLE)
+            with c_b:
+                fig2 = px.pie(commodities_df.groupby("category").size().reset_index(name="n"),
+                              values="n", names="category", title="Commodities by Category",
+                              color_discrete_sequence=px.colors.qualitative.Pastel, hole=0.45)
+                fig2.update_layout(height=360, **CHART)
                 st.plotly_chart(fig2, use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -433,323 +492,186 @@ with tab2:
             trend["7d_avg"]  = trend["modal_price"].rolling(7,  min_periods=1).mean()
             trend["30d_avg"] = trend["modal_price"].rolling(30, min_periods=1).mean()
 
-            st.markdown(f'<div class="section-title">📈 {sel_commodity} — {sel_market} Price Chart ({days} days)</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="section-title">📈 {sel_commodity} — {sel_market} ({days} days)</div>',
+                        unsafe_allow_html=True)
 
             fig = go.Figure()
-            # Range band
             fig.add_trace(go.Scatter(
                 x=pd.concat([trend["price_date"], trend["price_date"][::-1]]),
                 y=pd.concat([trend["max_price"], trend["min_price"][::-1]]),
-                fill="toself", fillcolor="rgba(56,142,60,0.12)",
-                line=dict(color="rgba(56,142,60,0)"),
+                fill="toself", fillcolor="rgba(22,163,74,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
                 name="Min–Max Range", hoverinfo="skip"
             ))
-            # Modal price
             fig.add_trace(go.Scatter(
                 x=trend["price_date"], y=trend["modal_price"],
                 mode="lines+markers", name="Modal Price",
-                line=dict(color="#2e7d32", width=2.5),
-                marker=dict(size=5, color="#2e7d32"),
+                line=dict(color="#4ade80", width=2.5),
+                marker=dict(size=4, color="#4ade80"),
             ))
-            # 7d MA
             fig.add_trace(go.Scatter(
                 x=trend["price_date"], y=trend["7d_avg"],
-                mode="lines", name="7-Day Average",
-                line=dict(color="#f57c00", width=2, dash="dash"),
+                mode="lines", name="7-Day Avg",
+                line=dict(color="#fb923c", width=2, dash="dash"),
             ))
-            # 30d MA
             if days >= 30:
                 fig.add_trace(go.Scatter(
                     x=trend["price_date"], y=trend["30d_avg"],
-                    mode="lines", name="30-Day Average",
-                    line=dict(color="#1565c0", width=1.5, dash="dot"),
+                    mode="lines", name="30-Day Avg",
+                    line=dict(color="#60a5fa", width=1.5, dash="dot"),
                 ))
-
             fig.update_layout(
-                yaxis_title="Price (₹ per Quintal)",
-                xaxis_title="Date",
-                height=400,
+                yaxis_title="Price (₹/Quintal)", height=420,
                 hovermode="x unified",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                **CHART_STYLE
+                **CHART
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Stats row
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Highest Price", f"₹{trend['max_price'].max():,.0f}")
-            s2.metric("Lowest Price",  f"₹{trend['min_price'].min():,.0f}")
-            avg = trend["modal_price"].mean()
-            last = trend["modal_price"].iloc[-1]
-            s3.metric("Average Price", f"₹{avg:,.0f}")
-            s4.metric(f"Trend ({days}d)",
-                      f"₹{last-trend['modal_price'].iloc[0]:+,.0f}",
-                      f"{((last/trend['modal_price'].iloc[0])-1)*100:+.1f}%")
+            s1,s2,s3,s4 = st.columns(4)
+            s1.metric("📈 Highest", f"₹{trend['max_price'].max():,.0f}")
+            s2.metric("📉 Lowest",  f"₹{trend['min_price'].min():,.0f}")
+            s3.metric("📊 Average", f"₹{trend['modal_price'].mean():,.0f}")
+            last_p = trend["modal_price"].iloc[-1]
+            first_p = trend["modal_price"].iloc[0]
+            s4.metric(f"📅 {days}d Change",
+                      f"₹{last_p-first_p:+,.0f}",
+                      f"{((last_p/first_p)-1)*100:+.1f}%")
 
-            # Compare across markets for same commodity
-            st.markdown(f'<div class="section-title">🏪 {sel_commodity} — Price at Other Mandis</div>', unsafe_allow_html=True)
-            all_mkt = read_prices(
-                commodity_id=commodity_id,
-                start_date=str(date.today() - timedelta(days=7))
-            )
+            # Cross-market comparison
+            st.markdown(f'<div class="section-title">🏪 {sel_commodity} — Compare Mandis (last 7 days)</div>',
+                        unsafe_allow_html=True)
+            all_mkt = read_prices(commodity_id=commodity_id,
+                                  start_date=str(date.today()-timedelta(days=7)))
             if not all_mkt.empty:
-                mkt_summary = all_mkt.groupby("market_name")["modal_price"].mean().reset_index()
-                mkt_summary.columns = ["Mandi", "Avg Price (₹)"]
-                mkt_summary = mkt_summary.sort_values("Avg Price (₹)", ascending=False)
-                # Highlight selected market
-                mkt_summary["You Selected"] = mkt_summary["Mandi"].apply(
-                    lambda x: "⭐ " + x if x == sel_market else x
-                )
-                fig3 = px.bar(
-                    mkt_summary, x="You Selected", y="Avg Price (₹)",
-                    color="Avg Price (₹)",
-                    color_continuous_scale=["#c8e6c9","#1b5e20"],
-                    title=f"Where is {sel_commodity} priced highest? (Last 7 days)",
-                    text="Avg Price (₹)",
-                )
-                fig3.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside")
-                fig3.update_layout(height=350, **CHART_STYLE,
-                                   coloraxis_showscale=False,
-                                   xaxis_title="Mandi", xaxis_tickangle=-25)
+                mkt_avg = all_mkt.groupby("market_name")["modal_price"].mean().reset_index()
+                mkt_avg.columns = ["Mandi","Avg Price (₹)"]
+                mkt_avg = mkt_avg.sort_values("Avg Price (₹)", ascending=False)
+                mkt_avg["Label"] = mkt_avg["Mandi"].apply(lambda x: "⭐ "+x if x==sel_market else x)
+                fig3 = px.bar(mkt_avg, x="Label", y="Avg Price (₹)",
+                              color="Avg Price (₹)",
+                              color_continuous_scale=["#14532d","#4ade80"],
+                              text="Avg Price (₹)",
+                              title=f"Best price for {sel_commodity} across mandis")
+                fig3.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside",
+                                   marker_line_width=0)
+                fig3.update_layout(height=360, **CHART,
+                                   coloraxis_showscale=False, xaxis_tickangle=-25)
                 st.plotly_chart(fig3, use_container_width=True)
 
-                best = mkt_summary.iloc[0]
+                best = mkt_avg.iloc[0]
                 if best["Mandi"] != sel_market:
-                    st.markdown(f"""
-                    <div class="tip-box">
-                    💡 <b>Better price available!</b> {best['Mandi']} currently offers ₹{best['Avg Price (₹)']:,.0f}
-                    vs ₹{mkt_summary[mkt_summary['Mandi']==sel_market]['Avg Price (₹)'].values[0]:,.0f}
-                    at {sel_market}. Consider selling there if transport cost allows.
-                    </div>""", unsafe_allow_html=True)
+                    curr_val = mkt_avg[mkt_avg["Mandi"]==sel_market]["Avg Price (₹)"].values
+                    if len(curr_val):
+                        st.markdown(f"""<div class="tip-box">
+                        💡 <b>Better price at {best['Mandi']}:</b> ₹{best['Avg Price (₹)']:,.0f}
+                        vs ₹{curr_val[0]:,.0f} at {sel_market}.
+                        Consider selling there if transport cost allows.
+                        </div>""", unsafe_allow_html=True)
         else:
-            st.info("No data found. Click Refresh in sidebar.")
+            st.info("No data. Click 🔄 Refresh in sidebar.")
     else:
-        st.info("👈 Please select a commodity and market from the sidebar.")
+        st.info("👈 Select a commodity and market from the sidebar.")
 
 # ════════════════════════════════════════════════════════════════════════════
-# TAB 3 — PRICE FORECAST
+# TAB 3 — PRICE ALERTS
 # ════════════════════════════════════════════════════════════════════════════
 with tab3:
-    if commodity_id and market_id:
-        st.markdown(f'<div class="section-title">🔮 Price Forecast — {sel_commodity} @ {sel_market}</div>',
-                    unsafe_allow_html=True)
-        st.markdown("""
-        <div class="tip-box">
-        🤖 <b>How this works:</b> Our AI studies the last 90+ days of price data and predicts
-        what price is likely in the next 14 days. This is an <i>estimate</i> — actual prices
-        depend on weather, government policy, and other factors.
-        </div>""", unsafe_allow_html=True)
-
-        col_btn, col_info = st.columns([1, 3])
-        with col_btn:
-            run_fc = st.button("▶ Generate Forecast", type="primary", use_container_width=True)
-
-        if run_fc or "fc_commodity" in st.session_state:
-            if run_fc:
-                with st.spinner("AI is analysing prices..."):
-                    fc_df = forecast_prices(commodity_id, market_id, horizon=14)
-                    st.session_state["fc_df"]        = fc_df
-                    st.session_state["fc_commodity"] = sel_commodity
-                    st.session_state["fc_market"]    = sel_market
-            else:
-                fc_df = st.session_state.get("fc_df", pd.DataFrame())
-
-            if isinstance(fc_df, pd.DataFrame) and not fc_df.empty:
-                hist = get_price_trend(commodity_id, market_id, days=60)
-                hist["price_date"]       = pd.to_datetime(hist["price_date"])
-                fc_df["forecast_date"]   = pd.to_datetime(fc_df["forecast_date"])
-
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=hist["price_date"], y=hist["modal_price"],
-                    mode="lines", name="Past Prices",
-                    line=dict(color="#2e7d32", width=2.5)
-                ))
-                if "lower_bound" in fc_df.columns:
-                    fig.add_trace(go.Scatter(
-                        x=pd.concat([fc_df["forecast_date"], fc_df["forecast_date"][::-1]]),
-                        y=pd.concat([fc_df["upper_bound"], fc_df["lower_bound"][::-1]]),
-                        fill="toself", fillcolor="rgba(245,124,0,0.12)",
-                        line=dict(color="rgba(0,0,0,0)"),
-                        name="Likely Range", hoverinfo="skip"
-                    ))
-                fig.add_trace(go.Scatter(
-                    x=fc_df["forecast_date"], y=fc_df["predicted_price"],
-                    mode="lines+markers", name="AI Forecast",
-                    line=dict(color="#f57c00", width=2.5, dash="dot"),
-                    marker=dict(symbol="diamond", size=8, color="#f57c00"),
-                ))
-                fig.add_vline(
-                    x=hist["price_date"].max(),
-                    line_dash="dash", line_color="#999",
-                    annotation_text="Today", annotation_position="top"
-                )
-                fig.update_layout(
-                    yaxis_title="Price (₹/Quintal)", xaxis_title="Date",
-                    height=380, hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    **CHART_STYLE
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Simple forecast card table
-                st.markdown("**📋 Day-by-day Forecast**")
-                cols = st.columns(7)
-                for i, (_, row) in enumerate(fc_df.head(7).iterrows()):
-                    with cols[i % 7]:
-                        day_label = pd.to_datetime(row["forecast_date"]).strftime("%d %b")
-                        pred      = row["predicted_price"]
-                        curr      = hist["modal_price"].iloc[-1]
-                        diff      = pred - curr
-                        arrow     = "▲" if diff >= 0 else "▼"
-                        clr       = "#d32f2f" if diff >= 0 else "#2e7d32"
-                        st.markdown(f"""
-                        <div class="price-card" style="padding:12px 8px">
-                          <div style="font-size:0.78rem; color:#666">{day_label}</div>
-                          <div style="font-size:1.25rem; font-weight:700; color:#1b5e20">₹{pred:,.0f}</div>
-                          <div style="font-size:0.78rem; color:{clr}">{arrow} ₹{abs(diff):,.0f}</div>
-                        </div>""", unsafe_allow_html=True)
-
-                # Sell advice
-                next7_avg = fc_df.head(7)["predicted_price"].mean()
-                next14_avg = fc_df["predicted_price"].mean()
-                curr_price = hist["modal_price"].iloc[-1]
-                if next7_avg > curr_price * 1.05:
-                    st.markdown("""
-                    <div class="alert-low">
-                    💰 <b>Forecast Tip:</b> Prices are expected to RISE in the next 7 days.
-                    If you can wait, you may get a better price soon.
-                    </div>""", unsafe_allow_html=True)
-                elif next7_avg < curr_price * 0.95:
-                    st.markdown("""
-                    <div class="alert-high">
-                    ⚠️ <b>Forecast Tip:</b> Prices may FALL in the next 7 days.
-                    Consider selling sooner rather than later.
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown("""
-                    <div class="tip-box">
-                    📊 <b>Forecast Tip:</b> Prices are expected to remain stable.
-                    Sell when convenient.
-                    </div>""", unsafe_allow_html=True)
-            else:
-                st.warning("Not enough data for forecast. Need at least 15 days of history.")
-    else:
-        st.info("👈 Select a commodity and market to see AI price forecast.")
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 4 — PRICE ALERTS / ANOMALIES
-# ════════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.markdown('<div class="section-title">⚠️ Price Alerts — Unusual Price Movements</div>',
-                unsafe_allow_html=True)
-    st.markdown("""
-    <div class="tip-box">
-    This page shows when prices suddenly jumped or dropped unusually.
-    It helps you understand if there's a supply shortage, bumper crop, or market disruption.
+    st.markdown('<div class="section-title">⚠️ Unusual Price Movements</div>', unsafe_allow_html=True)
+    st.markdown("""<div class="tip-box">
+    Detects sudden price spikes and drops — may signal supply shortages,
+    bumper harvests, or market disruptions.
     </div>""", unsafe_allow_html=True)
 
-    col_detect, col_days2 = st.columns([1, 2])
-    with col_detect:
-        if st.button("🔍 Check for Alerts", type="primary", use_container_width=True):
+    col_det, col_sl = st.columns([1, 2])
+    with col_det:
+        if st.button("🔍 Scan for Alerts", type="primary", use_container_width=True):
             if commodity_id and market_id:
-                with st.spinner("Scanning for unusual prices..."):
+                with st.spinner("Scanning..."):
                     found = detect_anomalies(commodity_id, market_id)
-                    st.success(f"Found {len(found)} unusual price movements")
+                    st.success(f"Found {len(found)} unusual movements")
             else:
                 st.warning("Select a commodity and market first.")
-    with col_days2:
-        alert_days = st.slider("Show alerts from last N days", 7, 60, 30)
+    with col_sl:
+        alert_days = st.slider("Days to look back", 7, 60, 30, label_visibility="visible")
 
     anomalies_df = read_anomalies(alert_days)
     if not anomalies_df.empty:
-        # Summary numbers
-        a1, a2, a3 = st.columns(3)
+        a1,a2,a3 = st.columns(3)
         a1.metric("Total Alerts", len(anomalies_df))
-        a2.metric("🔴 Critical / High",
+        a2.metric("🔴 Critical/High",
                   len(anomalies_df[anomalies_df["severity"].isin(["Critical","High"])]))
         a3.metric("Commodities Affected", anomalies_df["commodity_name"].nunique())
 
+        st.markdown("<br>", unsafe_allow_html=True)
         for _, row in anomalies_df.head(15).iterrows():
-            icon = "🔴" if row["severity"] == "Critical" else \
-                   "🟡" if row["severity"] == "High" else "🔵"
-            cls  = "alert-warn" if row["severity"] in ("Critical","High") else "alert-high"
+            icon = "🔴" if row["severity"]=="Critical" else "🟡" if row["severity"]=="High" else "🔵"
             dev  = row["deviation_pct"]
-            direction = "⬆️ Price spike" if dev > 0 else "⬇️ Price drop"
+            direction = "⬆️ Spike" if dev > 0 else "⬇️ Drop"
+            cls  = "alert-wait" if row["severity"] in ("Critical","High") else "alert-warn"
             st.markdown(f"""
             <div class="{cls}">
               <b>{icon} {row['commodity_name']} @ {row['market_name']}, {row['state']}</b>
-              &nbsp;&nbsp;<small>{row['detected_date']}</small><br>
-              <b>{direction} of {abs(dev):.1f}%</b> — {row['description']}
+              &nbsp;<small style="opacity:0.7">{row['detected_date']}</small><br>
+              <b>{direction} {abs(dev):.1f}%</b> — {row['description']}
             </div>""", unsafe_allow_html=True)
     else:
-        st.success("✅ No unusual price movements found in the last {} days.".format(alert_days))
-        st.markdown("""
-        <div class="tip-box">
-        💡 Run the check above to scan for price spikes and drops in your selected commodity.
-        </div>""", unsafe_allow_html=True)
+        st.success(f"✅ No unusual movements in the last {alert_days} days.")
 
 # ════════════════════════════════════════════════════════════════════════════
-# TAB 5 — ALL STATES ANALYTICS
+# TAB 4 — ALL STATES
 # ════════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.markdown('<div class="section-title">🗺️ State-wise Price Comparison</div>',
-                unsafe_allow_html=True)
-
+with tab4:
+    st.markdown('<div class="section-title">🗺️ State-wise Price Comparison</div>', unsafe_allow_html=True)
     state_df = get_state_analytics()
     if not state_df.empty:
-        # Which state has highest / lowest price
-        best_state  = state_df.loc[state_df["avg_price"].idxmax()]
-        worst_state = state_df.loc[state_df["avg_price"].idxmin()]
-
-        b1, b2 = st.columns(2)
+        best_s  = state_df.loc[state_df["avg_price"].idxmax()]
+        worst_s = state_df.loc[state_df["avg_price"].idxmin()]
+        b1,b2 = st.columns(2)
         b1.markdown(f"""
-        <div class="price-card" style="border-top-color:#1565c0">
-          <div class="price-label">💰 Highest Average Prices</div>
-          <div class="price-main" style="color:#1565c0">{best_state['state']}</div>
-          <div class="price-label">₹{best_state['avg_price']:,.0f}/Quintal average</div>
+        <div class="price-card" style="border-top-color:#60a5fa">
+          <div class="price-label">💰 Highest Avg Prices</div>
+          <div class="price-main" style="color:#60a5fa">{best_s['state']}</div>
+          <div class="price-label">₹{best_s['avg_price']:,.0f} / Quintal avg</div>
         </div>""", unsafe_allow_html=True)
         b2.markdown(f"""
-        <div class="price-card" style="border-top-color:#388e3c">
-          <div class="price-label">🌿 Lowest Average Prices</div>
-          <div class="price-main" style="color:#388e3c">{worst_state['state']}</div>
-          <div class="price-label">₹{worst_state['avg_price']:,.0f}/Quintal average</div>
+        <div class="price-card" style="border-top-color:#4ade80">
+          <div class="price-label">🌿 Lowest Avg Prices</div>
+          <div class="price-main" style="color:#4ade80">{worst_s['state']}</div>
+          <div class="price-label">₹{worst_s['avg_price']:,.0f} / Quintal avg</div>
         </div>""", unsafe_allow_html=True)
 
-        fig = px.bar(
-            state_df.sort_values("avg_price", ascending=True),
-            x="avg_price", y="state", orientation="h",
-            color="avg_price",
-            color_continuous_scale=["#c8e6c9","#1b5e20"],
-            text="avg_price",
-            title="Average Commodity Price by State (₹/Quintal)",
-            labels={"avg_price":"Avg Price (₹)","state":"State"},
-        )
-        fig.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside")
-        fig.update_layout(height=450, **CHART_STYLE, coloraxis_showscale=False, xaxis_title="")
+        fig = px.bar(state_df.sort_values("avg_price", ascending=True),
+                     x="avg_price", y="state", orientation="h",
+                     color="avg_price",
+                     color_continuous_scale=["#14532d","#4ade80"],
+                     text="avg_price",
+                     title="Average Commodity Price by State (₹/Quintal)",
+                     labels={"avg_price":"Avg Price (₹)","state":""})
+        fig.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside",
+                          marker_line_width=0)
+        fig.update_layout(height=480, **CHART, coloraxis_showscale=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Summary table — simple version
-        st.markdown("**State Summary Table**")
-        display = state_df[["state","num_markets","avg_price","max_price","min_price"]].copy()
-        display.columns = ["State", "Markets", "Avg Price (₹)", "Highest (₹)", "Lowest (₹)"]
-        for col in ["Avg Price (₹)","Highest (₹)","Lowest (₹)"]:
-            display[col] = display[col].apply(lambda x: f"₹{x:,.0f}")
-        st.dataframe(display.sort_values("Avg Price (₹)", ascending=False),
+        st.markdown("**State Summary**")
+        disp = state_df[["state","num_markets","avg_price","max_price","min_price"]].copy()
+        disp.columns = ["State","Markets","Avg (₹)","High (₹)","Low (₹)"]
+        for col in ["Avg (₹)","High (₹)","Low (₹)"]:
+            disp[col] = disp[col].apply(lambda x: f"₹{x:,.0f}")
+        st.dataframe(disp.sort_values("Avg (₹)", ascending=False),
                      use_container_width=True, hide_index=True)
     else:
-        st.info("No state data yet. Click Refresh in sidebar.")
+        st.info("No data yet. Click 🔄 Refresh in sidebar.")
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style="margin-top:40px; padding:16px; text-align:center;
-            border-top:2px solid #c8e6c9; color:#4caf50; font-size:0.82rem; background:white; border-radius:10px;">
-  🌾 <b>Agri Price Tracker</b> &nbsp;|&nbsp;
-  Data from Agmarknet (data.gov.in) &nbsp;|&nbsp;
-  Updated daily &nbsp;|&nbsp;
-  AI Forecast powered by Machine Learning<br>
-  <span style="color:#999; font-size:0.75rem;">
-    Note: Forecasts are estimates. Always confirm prices at your local mandi before selling.
+<div style="margin-top:48px; padding:20px; text-align:center;
+            border-top:1px solid #1e2d40; color:#475569; font-size:0.8rem;">
+  🌾 <b style="color:#4ade80">Agri Price Tracker</b> &nbsp;·&nbsp;
+  Data from Agmarknet (data.gov.in) &nbsp;·&nbsp; Updated daily &nbsp;·&nbsp;
+  ML anomaly detection<br>
+  <span style="color:#334155; font-size:0.72rem;">
+    Prices shown are indicative. Always verify at your local mandi before selling.
   </span>
 </div>
 """, unsafe_allow_html=True)
